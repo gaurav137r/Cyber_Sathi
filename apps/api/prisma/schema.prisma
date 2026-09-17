@@ -1,0 +1,118 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum CaseStatus {
+  DRAFT
+  PROCESSING
+  CLASSIFIED
+  REVIEWED
+  FILED
+  RESOLVED
+  ARCHIVED
+}
+
+enum EvidenceType {
+  AUDIO
+  IMAGE
+  SCREENSHOT
+  DOCUMENT
+}
+
+enum ReportKind {
+  INTERNAL
+  PUBLIC_REDACTED
+}
+
+/// Account holder for a case. Auth identity fields arrive in Stage 4.
+/// Retention: until the user deletes the account or the last related case
+/// retention window expires — needed to scope cases and audit actors.
+model User {
+  id          String          @id @default(uuid())
+  displayName String?
+  createdAt   DateTime        @default(now())
+  updatedAt   DateTime        @updatedAt
+  cases       Case[]
+  auditLogs   AuditLogEntry[]
+
+  @@map("users")
+}
+
+/// Private case record. Never send this row to social surfaces — use ReportVersion PUBLIC_REDACTED.
+/// Retention: active while status != ARCHIVED; archived cases kept 24 months for tracking/escalation, then eligible for purge.
+model Case {
+  id                 String          @id @default(uuid())
+  userId             String
+  user               User            @relation(fields: [userId], references: [id], onDelete: Restrict)
+  status             CaseStatus      @default(DRAFT)
+  category           String?
+  categoryConfidence Float?
+  detectedLanguage   String?
+  rawTranscript      String?
+  structuredFields   Json?
+  filingDestination  String?
+  trackingNumber     String?
+  createdAt          DateTime        @default(now())
+  updatedAt          DateTime        @updatedAt
+  evidence           EvidenceItem[]
+  reportVersions     ReportVersion[]
+  auditLogs          AuditLogEntry[]
+
+  @@index([userId, createdAt])
+  @@index([status])
+  @@map("cases")
+}
+
+/// Binary files live in MinIO/S3; this row is metadata only.
+/// Retention: same window as parent Case; objects deleted from the bucket on purge.
+model EvidenceItem {
+  id                String       @id @default(uuid())
+  caseId            String
+  case              Case         @relation(fields: [caseId], references: [id], onDelete: Cascade)
+  type              EvidenceType
+  storageKey        String
+  extractedText     String?
+  extractedEntities Json?
+  uploadedAt        DateTime     @default(now())
+
+  @@index([caseId])
+  @@map("evidence_items")
+}
+
+/// INTERNAL = full private snapshot. PUBLIC_REDACTED = post-redaction derivative only.
+/// Retention: INTERNAL same as Case; PUBLIC_REDACTED kept while a public post exists (Stage 6+), else same as Case.
+model ReportVersion {
+  id          String     @id @default(uuid())
+  caseId      String
+  case        Case       @relation(fields: [caseId], references: [id], onDelete: Cascade)
+  version     Int
+  kind        ReportKind
+  content     Json
+  generatedAt DateTime   @default(now())
+
+  @@unique([caseId, version, kind])
+  @@index([caseId])
+  @@map("report_versions")
+}
+
+/// Append-only confirmation/action log. Required for irreversible actions.
+/// Retention: 36 months (complaint + public-post confirmation evidence), then eligible for purge.
+model AuditLogEntry {
+  id          String   @id @default(uuid())
+  caseId      String
+  case        Case     @relation(fields: [caseId], references: [id], onDelete: Restrict)
+  actorUserId String
+  actor       User     @relation(fields: [actorUserId], references: [id], onDelete: Restrict)
+  action      String
+  metadata    Json?
+  timestamp   DateTime @default(now())
+
+  @@index([caseId, timestamp])
+  @@index([actorUserId, timestamp])
+  @@map("audit_log_entries")
+}

@@ -1,16 +1,40 @@
+# Dependencies
 node_modules/
+
+# Builds
 dist/
 build/
 .cache/
-.env*
+*.tsbuildinfo
+
+# Env (keep examples)
+.env
+.env.*
+!.env.example
+
+# Vite / frontend
 .vite/
 vite.config.*.timestamp-*
-*.tsbuildinfo
-*-debug.log*
+
+# Logs
 logs/
 *.log
-.claude-replay.*
+*-debug.log*
+
+# Prisma
+apps/api/prisma/*.db
+apps/api/prisma/*.db-journal
+
+# Local object storage / compose volumes (if bound)
 .tmp-*
+.docker-data/
+
+# IDE / OS
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/*
+!.vscode/extensions.json
 
 # Platform-managed agentplat state, not project source. In the
 # client-initiated single-repo workspace layout (make's `Path: "."` spec) the
@@ -18,3 +42,4 @@ logs/
 # beside it.
 /.plugins/
 /.opencode-skills/
+.claude-replay.*

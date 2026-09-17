@@ -3,11 +3,21 @@
   "private": true,
   "version": "1.0.0",
   "type": "module",
+  "packageManager": "pnpm@10.34.3",
+  "engines": {
+    "node": ">=22"
+  },
   "scripts": {
     "dev": "vite --host 0.0.0.0",
+    "start:dev": "pnpm --filter @cybersathi/api start:dev",
     "build": "vite build",
     "preview": "vite preview",
-    "format": "oxfmt"
+    "format": "oxfmt",
+    "compose:up": "docker compose up -d postgres redis minio minio-init",
+    "compose:up:all": "docker compose up -d --build",
+    "compose:down": "docker compose down",
+    "prisma:migrate": "pnpm --filter @cybersathi/api prisma:migrate",
+    "prisma:deploy": "pnpm --filter @cybersathi/api exec prisma migrate deploy"
   },
   "dependencies": {
     "react": "^19.0.0",
