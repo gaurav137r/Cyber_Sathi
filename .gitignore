@@ -43,3 +43,23 @@ Thumbs.db
 /.plugins/
 /.opencode-skills/
 .claude-replay.*
+
+# AI agent / coding-assistant metadata and local workspace state
+.ai/
+.agent/
+.agents/
+.claude/
+.cursor/
+.windsurf/
+.gemini/
+.copilot/
+.copilot-*/
+.opencode/
+.opencode-*/
+.mcp.json
+*.instructions.md
+*.prompt.md
+*.agent.md
+
+# Keep this file local; do not commit or push it
+.gitignore
