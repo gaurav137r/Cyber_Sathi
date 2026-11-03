@@ -46,9 +46,10 @@ Requires **Node 22+**, **pnpm 10.34.3**, and **Docker Engine 27.x** (Compose V2)
 
 ```bash
 cp .env.example .env
+cp apps/api/.env.example apps/api/.env
 pnpm install
 pnpm compose:up
-pnpm prisma:deploy
+pnpm --filter @cybersathi/api prisma:deploy
 pnpm --filter @cybersathi/api prisma:seed
 pnpm start:dev
 ```
@@ -61,6 +62,16 @@ pnpm start:dev
 Hot-reload the API on the host with `pnpm start:dev` (it talks to Compose Postgres/Redis/MinIO). To run the API in a container as well: `pnpm compose:up:all`.
 
 Frontend prototype: `pnpm dev`.
+
+### Supabase Auth and database
+
+Create a Supabase project, enable **Phone** under Authentication providers, and configure an SMS provider. For email OTPs, edit the project's **Authentication > Email Templates > Magic Link** template to include `{{ .Token }}`; Supabase otherwise sends a magic link instead of the six-digit code this UI asks for. Set `SUPABASE_URL` and `SUPABASE_PUBLISHABLE_KEY` in `apps/api/.env` from Project Settings > API; the API also accepts the legacy `SUPABASE_ANON_KEY` name. Set the same project URL and publishable key as `VITE_SUPABASE_URL` and `VITE_SUPABASE_PUBLISHABLE_KEY` in the root `.env` for the browser client (the existing `NEXT_PUBLIC_` and `EXPO_PUBLIC_` aliases are also accepted). Sign-in and OTP verification use Supabase Auth. The API validates the Supabase bearer token and stores the profile and case data in Postgres through Prisma.
+
+To use the **remote Supabase database**, replace `DATABASE_URL` in `apps/api/.env` with the Postgres connection string from the Supabase Dashboard's **Connect** dialog (use the direct connection when your network supports its IP version, or the session pooler otherwise). Replace the password placeholder locally, and percent-encode reserved characters in the password. Do not put this URI or a Supabase secret/service-role key in the browser `.env` or commit either value. The checked-in `DATABASE_URL` example targets local Compose Postgres; it does not connect to Supabase.
+
+Apply the app schema to the database selected by `DATABASE_URL` with `pnpm --filter @cybersathi/api prisma:deploy`. Review the target database and connection string before running this command; it applies the repository's Prisma migrations. The onboarding screen requests and verifies an OTP through Supabase Auth, then sends the profile to the authenticated API for database persistence. The API and supporting Redis/MinIO services must also be running for profile onboarding.
+
+Copy `apps/mobile/.env.example` to `apps/mobile/.env` to configure the mobile wrapper. The current mobile app is a WebView shell and does not read the Expo Supabase variables directly. Publishable keys are public and must be protected by Row Level Security. Set `CORS_ORIGINS` to the frontend origin when running with `NODE_ENV=production`; development mode allows local origins.
 
 ### Smoke checks
 

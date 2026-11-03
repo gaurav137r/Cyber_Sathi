@@ -1,0 +1,15 @@
+{
+  "expo": {
+    "name": "Cyber Sathi",
+    "slug": "cyber-sathi",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "android": {
+      "package": "com.cybersathi.mobile",
+      "permissions": [
+        "android.permission.RECORD_AUDIO",
+        "android.permission.MODIFY_AUDIO_SETTINGS"
+      ]
+    }
+  }
+}

@@ -1,0 +1,1 @@
+ALTER TABLE "Case" ADD COLUMN "canonicalEntities" JSONB NOT NULL DEFAULT '{}'::jsonb;

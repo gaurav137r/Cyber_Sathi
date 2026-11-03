@@ -33,12 +33,20 @@ enum ReportKind {
 /// Retention: until the user deletes the account or the last related case
 /// retention window expires — needed to scope cases and audit actors.
 model User {
-  id          String          @id @default(uuid())
-  displayName String?
-  createdAt   DateTime        @default(now())
-  updatedAt   DateTime        @updatedAt
-  cases       Case[]
-  auditLogs   AuditLogEntry[]
+  id                  String          @id @default(uuid())
+  supabaseId          String?         @unique
+  email               String?         @unique
+  phoneE164           String?         @unique
+  displayName         String?
+  preferredLanguage   String          @default("en")
+  state               String?
+  district            String?
+  onboardingCompleted Boolean         @default(false)
+  onboardingStep      String?         @default("language")
+  createdAt           DateTime        @default(now())
+  updatedAt           DateTime        @updatedAt
+  cases               Case[]
+  auditLogs           AuditLogEntry[]
 
   @@map("users")
 }
@@ -46,22 +54,26 @@ model User {
 /// Private case record. Never send this row to social surfaces — use ReportVersion PUBLIC_REDACTED.
 /// Retention: active while status != ARCHIVED; archived cases kept 24 months for tracking/escalation, then eligible for purge.
 model Case {
-  id                 String          @id @default(uuid())
-  userId             String
-  user               User            @relation(fields: [userId], references: [id], onDelete: Restrict)
-  status             CaseStatus      @default(DRAFT)
-  category           String?
-  categoryConfidence Float?
-  detectedLanguage   String?
-  rawTranscript      String?
-  structuredFields   Json?
-  filingDestination  String?
-  trackingNumber     String?
-  createdAt          DateTime        @default(now())
-  updatedAt          DateTime        @updatedAt
-  evidence           EvidenceItem[]
-  reportVersions     ReportVersion[]
-  auditLogs          AuditLogEntry[]
+  id                         String          @id @default(uuid())
+  userId                     String
+  user                       User            @relation(fields: [userId], references: [id], onDelete: Restrict)
+  status                     CaseStatus      @default(DRAFT)
+  category                   String?
+  categoryConfidence         Float?
+  classificationExplanation String?
+  clarificationRequired      Boolean         @default(false)
+  detectedLanguage           String?
+  rawTranscript              String?
+  canonicalTranscript        String?
+  structuredFields           Json?
+  canonicalEntities          Json?           @default("{}")
+  filingDestination          String?
+  trackingNumber             String?
+  createdAt                  DateTime        @default(now())
+  updatedAt                  DateTime        @updatedAt
+  evidenceItems              EvidenceItem[]
+  reportVersions             ReportVersion[]
+  auditLogs                  AuditLogEntry[]
 
   @@index([userId, createdAt])
   @@index([status])

@@ -1,29 +1,25 @@
-import { useState, useEffect, useRef } from "react";
+import { useState, useEffect, useRef } from "react"
+import { supabase } from "./lib/supabase"
+import type { ChatMessage, ExtractedCaseData } from "./lib/ai"
+import {
+  generateSathiSpeech,
+  mergeSathiFactsIntoReport,
+  sendSathiTurn,
+  sathiFactsToReport,
+  startSathiSession,
+  type SathiFacts,
+  type SathiResponse,
+} from "./lib/sathi"
+import { fetchUserCases, saveReviewedCase, type CaseRecord } from "./lib/cases"
+import { ensureProfile, updateProfile } from "./lib/profiles"
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
-type Screen =
-  | "splash"
-  | "onboard-language"
-  | "onboard-how"
-  | "onboard-permissions"
-  | "onboard-otp"
-  | "home"
-  | "listening"
-  | "processing"
-  | "scam-analysis"
-  | "review-details"
-  | "portal-autofill"
-  | "final-verification"
-  | "success"
-  | "my-cases"
-  | "case-status"
-  | "defend"
-  | "profile";
+type Screen = "loading" | "auth" | "onboard-profile" | "home" | "agent-chat" | "review-report" | "success" | "my-cases" | "case-status" | "defend" | "profile"
 
-type Tab = "home" | "my-cases" | "defend" | "profile";
+type Tab = "home" | "my-cases" | "defend" | "profile"
 
-// ─── Colors (token references) ────────────────────────────────────────────────
+// ─── Colors (Theme tokens) ────────────────────────────────────────────────────
 const C = {
   teal900: "#0B2E2E",
   teal700: "#0F4C4C",
@@ -41,48 +37,230 @@ const C = {
   success: "#3FAE5C",
   successBg: "#DFF3E4",
   divider: "#E6E8E6",
-};
+}
 
-// ─── Demo Data ────────────────────────────────────────────────────────────────
-const DEMO_OTP = "482951";
-const DEMO_CAPTCHA = "W7K9P";
-const DEMO_TRACKING = "ACK-2026-981042";
-
-// ─── Main App ─────────────────────────────────────────────────────────────────
+// ─── Main Application ─────────────────────────────────────────────────────────
 
 export default function App() {
-  const [screen, setScreen] = useState<Screen>("splash");
-  const [activeTab, setActiveTab] = useState<Tab>("home");
-  const [language, setLanguage] = useState<"en" | "hi">("en");
-  const [howSlide, setHowSlide] = useState(0);
+  const [screen, setScreen] = useState<Screen>("loading")
+  const [activeTab, setActiveTab] = useState<Tab>("home")
+  const [language, setLanguage] = useState<"en" | "hi" | "bn">("en")
+  const [sessionUser, setSessionUser] = useState<any>(null)
+  const [sathiCaseId, setSathiCaseId] = useState<string | null>(null)
+  const [sathiFacts, setSathiFacts] = useState<SathiFacts | null>(null)
 
-  // Navigate helper
-  const go = (s: Screen) => setScreen(s);
+  // Real User Profile
+  const [userProfile, setUserProfile] = useState({
+    displayName: "",
+    phone: "",
+    email: "",
+    stateDistrict: "",
+    language: "en",
+  })
 
-  // Tab navigation
+  // Real Active Case Flow State
+  const [chatMessages, setChatMessages] = useState<ChatMessage[]>([])
+  const [extractedData, setExtractedData] = useState<ExtractedCaseData>({
+    category: "",
+    amount: "",
+    suspectPhone: "",
+    suspectUpi: "",
+    suspectDetails: "",
+    platform: "",
+    incidentDate: "",
+    summary: "",
+    complaintNarrative: "",
+    actionRequested: "",
+    isComplete: false,
+  })
+
+  // Real Case Records from Database
+  const [userCases, setUserCases] = useState<CaseRecord[]>([])
+  const [casesLoading, setCasesLoading] = useState(false)
+  const [casesError, setCasesError] = useState("")
+  const [activeCase, setActiveCase] = useState<CaseRecord | null>(null)
+  const [submittedCase, setSubmittedCase] = useState<CaseRecord | null>(null)
+
+  // 1. Check real Supabase Authentication session on boot
+  useEffect(() => {
+    async function initAuth() {
+      try {
+        const {
+          data: { session },
+        } = await supabase.auth.getSession()
+        if (session?.user) {
+          await handleSessionEstablished(session.user)
+        } else {
+          setScreen("auth")
+        }
+      } catch (err) {
+        console.warn("Auth check note:", err)
+        setScreen("auth")
+      }
+    }
+
+    void initAuth()
+
+    // Listen to real-time auth changes
+    const {
+      data: { subscription },
+    } = supabase.auth.onAuthStateChange((_event, session) => {
+      if (session?.user) {
+        void handleSessionEstablished(session.user)
+      } else {
+        setSessionUser(null)
+        setScreen("auth")
+      }
+    })
+
+    return () => {
+      subscription.unsubscribe()
+    }
+  }, [])
+
+  async function handleSessionEstablished(user: any) {
+    setSessionUser(user)
+    const meta = user.user_metadata || {}
+    const phone = meta.phone_e164 || meta.phone || ""
+    const loc = meta.state_district || meta.state || ""
+    const lang = (meta.preferred_language as "en" | "hi" | "bn") || "en"
+
+    let name =
+      meta.full_name || meta.displayName || user.email?.split("@")[0] || ""
+
+    try {
+      const profile = await ensureProfile(user)
+      if (profile.full_name) {
+        name = profile.full_name
+      }
+    } catch (err) {
+      console.warn("Could not load or create profile row:", err)
+    }
+
+    setUserProfile({
+      displayName: name,
+      phone,
+      email: user.email || "",
+      stateDistrict: loc,
+      language: lang,
+    })
+    setLanguage(lang)
+
+    void loadCases(user.id)
+
+    if (!name || name === user.email?.split("@")[0]) {
+      setScreen("onboard-profile")
+    } else {
+      setScreen("home")
+    }
+  }
+
+  async function loadCases(userId: string) {
+    if (!userId) return
+    setCasesLoading(true)
+    setCasesError("")
+    try {
+      const records = await fetchUserCases()
+      setUserCases(records)
+    } catch (err) {
+      setCasesError(
+        err instanceof Error
+          ? err.message
+          : "Could not load cases from the API.",
+      )
+    } finally {
+      setCasesLoading(false)
+    }
+  }
+
+  // Navigation helpers
+  const go = (s: Screen) => setScreen(s)
+
   const switchTab = (tab: Tab) => {
-    setActiveTab(tab);
-    if (tab === "home") go("home");
-    else if (tab === "my-cases") go("my-cases");
-    else if (tab === "defend") go("defend");
-    else if (tab === "profile") go("profile");
-  };
+    setActiveTab(tab)
+    if (tab === "home") go("home")
+    else if (tab === "my-cases") {
+      if (sessionUser?.id) void loadCases(sessionUser.id)
+      go("my-cases")
+    } else if (tab === "defend") go("defend")
+    else if (tab === "profile") go("profile")
+  }
 
-  // Show tab bar on main screens
-  const showTabBar = ["home", "my-cases", "defend", "profile"].includes(screen);
+  const startNewReport = async (initialTopic?: string) => {
+    setSathiCaseId(null)
+    setSathiFacts(null)
+    const greetingText = initialTopic
+      ? `Hello. I see you want to report an incident regarding "${initialTopic}". I am Cyber Sathi. Please describe what happened, when it occurred, and if any money was transferred.`
+      : language === "hi"
+        ? "नमस्ते, मैं साइबर साथी हूँ। कृपया बताएं कि आपके साथ क्या धोखाधड़ी हुई है? यदि हाल ही में पैसा कटा है, तो तुरंत 1930 पर भी कॉल करें।"
+        : language === "bn"
+          ? "নমস্কার, আমি সাইবার সাথী। আপনার সাথে কী ধরনের সাইবার জালিয়াতি হয়েছে তা বলুন।"
+          : "Hello, I am Cyber Sathi, your cybercrime response assistant. Please tell me what happened in your own words. If you recently transferred money, please also call 1930 immediately."
+
+    setChatMessages([])
+
+    setExtractedData({
+      category: initialTopic || "",
+      amount: "",
+      suspectPhone: "",
+      suspectUpi: "",
+      suspectDetails: "",
+      platform: "",
+      incidentDate: "",
+      summary: "",
+      complaintNarrative: "",
+      actionRequested: "",
+      isComplete: false,
+    })
+
+    go("agent-chat")
+    try {
+      const session = await startSathiSession(language)
+      setSathiCaseId(session.caseId)
+      setSathiFacts(session.facts)
+      setExtractedData(sathiFactsToReport(session.facts))
+      setChatMessages([
+        {
+          id: `msg-welcome-${Date.now()}`,
+          sender: "agent",
+          text: initialTopic
+            ? `Let's talk about ${initialTopic}. ${session.reply ?? greetingText}`
+            : session.reply ?? greetingText,
+          timestamp: new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }),
+        },
+      ])
+    } catch (error) {
+      setChatMessages([
+        {
+          id: `msg-error-${Date.now()}`,
+          sender: "agent",
+          text: error instanceof Error ? error.message : "Sathi is unavailable right now. Please try again.",
+          timestamp: new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }),
+        },
+      ])
+    }
+  }
+
+  const handleCaseSubmitted = async (caseRec: CaseRecord) => {
+    setSubmittedCase(caseRec)
+    setUserCases((prev) => [caseRec, ...prev])
+    go("success")
+  }
+
+  const showTabBar = ["home", "my-cases", "defend", "profile"].includes(screen)
 
   return (
     <div
       style={{
         minHeight: "100vh",
-        background: "#1a2e2e",
+        background: "#132323",
         display: "flex",
         alignItems: "center",
         justifyContent: "center",
         fontFamily: "'Noto Sans', 'Noto Sans Devanagari', sans-serif",
       }}
     >
-      {/* Mobile frame */}
+      {/* Mobile viewport frame */}
       <div
         style={{
           width: 390,
@@ -90,81 +268,234 @@ export default function App() {
           background: C.bgCanvas,
           borderRadius: 44,
           overflow: "hidden",
-          boxShadow: "0 40px 120px rgba(0,0,0,0.6), 0 0 0 12px #1a1a1a, 0 0 0 14px #333",
+          boxShadow:
+            "0 40px 120px rgba(0,0,0,0.6), 0 0 0 12px #1a1a1a, 0 0 0 14px #333",
           position: "relative",
           display: "flex",
           flexDirection: "column",
         }}
       >
-        {/* Status bar */}
+        {/* Top Status Bar */}
         <div
           style={{
             height: 44,
-            background: screen.startsWith("onboard") || screen === "splash" || screen === "listening" || screen === "processing" ? C.teal900 : C.bgCanvas,
+            background: screen === "agent-chat" ? C.teal900 : C.bgCanvas,
             display: "flex",
             alignItems: "center",
             justifyContent: "space-between",
             padding: "0 24px",
             flexShrink: 0,
+            transition: "background 0.2s",
           }}
         >
-          <span style={{ fontSize: 12, fontWeight: 600, color: screen.startsWith("onboard") || screen === "splash" || screen === "listening" || screen === "processing" ? "rgba(255,255,255,0.8)" : C.textSecondary }}>9:41</span>
+          <span
+            style={{
+              fontSize: 12,
+              fontWeight: 600,
+              color:
+                screen === "agent-chat"
+                  ? "rgba(255,255,255,0.8)"
+                  : C.textSecondary,
+            }}
+          >
+            9:41
+          </span>
           <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
-            {["📶", "🔋"].map((e, i) => (
-              <span key={i} style={{ fontSize: 11 }}>{e}</span>
-            ))}
+            <span style={{ fontSize: 11 }}>📶</span>
+            <span style={{ fontSize: 11 }}>🔋</span>
           </div>
         </div>
 
-        {/* Screen content */}
-        <div style={{ flex: 1, overflow: "hidden", position: "relative", display: "flex", flexDirection: "column" }}>
-          {screen === "splash" && <SplashScreen onDone={() => go("onboard-language")} />}
-          {screen === "onboard-language" && <LanguageScreen language={language} setLanguage={setLanguage} onNext={() => go("onboard-how")} />}
-          {screen === "onboard-how" && <HowScreen slide={howSlide} setSlide={setHowSlide} onNext={() => go("onboard-permissions")} language={language} />}
-          {screen === "onboard-permissions" && <PermissionsScreen onNext={() => go("onboard-otp")} language={language} />}
-          {screen === "onboard-otp" && <OTPScreen onNext={() => go("home")} language={language} isOnboarding />}
-          {screen === "home" && <HomeScreen onStartReport={() => go("listening")} onCaseStatus={() => go("case-status")} language={language} />}
-          {screen === "listening" && <ListeningScreen onDone={() => go("processing")} onBack={() => go("home")} />}
-          {screen === "processing" && <ProcessingScreen onDone={() => go("scam-analysis")} />}
-          {screen === "scam-analysis" && <ScamAnalysisScreen onNext={() => go("review-details")} onBack={() => go("home")} />}
-          {screen === "review-details" && <ReviewDetailsScreen onNext={() => go("portal-autofill")} onBack={() => go("scam-analysis")} />}
-          {screen === "portal-autofill" && <PortalAutofillScreen onNext={() => go("final-verification")} />}
-          {screen === "final-verification" && <FinalVerificationScreen onNext={() => go("success")} />}
-          {screen === "success" && <SuccessScreen onTrack={() => go("case-status")} onHome={() => { setActiveTab("home"); go("home"); }} />}
-          {screen === "my-cases" && <MyCasesScreen onCase={() => go("case-status")} />}
-          {screen === "case-status" && <CaseStatusScreen onBack={() => go("my-cases")} />}
-          {screen === "defend" && <DefendScreen />}
-          {screen === "profile" && <ProfileScreen language={language} setLanguage={setLanguage} />}
+        {/* Screen Routing */}
+        <div
+          style={{
+            flex: 1,
+            overflow: "hidden",
+            position: "relative",
+            display: "flex",
+            flexDirection: "column",
+          }}
+        >
+          {screen === "loading" && <LoadingScreen />}
+
+          {screen === "auth" && (
+            <RealAuthScreen
+              onAuthenticated={(user) => handleSessionEstablished(user)}
+              language={language}
+            />
+          )}
+
+          {screen === "onboard-profile" && (
+            <ProfileSetupScreen
+              userId={sessionUser?.id}
+              userProfile={userProfile}
+              setUserProfile={setUserProfile}
+              onDone={() => go("home")}
+              language={language}
+            />
+          )}
+
+          {screen === "home" && (
+            <HomeScreen
+              onStartReport={startNewReport}
+              onViewCase={(c) => {
+                setActiveCase(c)
+                go("case-status")
+              }}
+              recentCases={userCases}
+              language={language}
+            />
+          )}
+
+          {screen === "agent-chat" && (
+            <AgentChatScreen
+              messages={chatMessages}
+              setMessages={setChatMessages}
+              extractedData={extractedData}
+              setExtractedData={setExtractedData}
+              caseId={sathiCaseId}
+              previousFacts={sathiFacts}
+              setPreviousFacts={setSathiFacts}
+              language={language}
+              onProceedToReview={() => go("review-report")}
+              onBack={() => go("home")}
+            />
+          )}
+
+          {screen === "review-report" && (
+            <ReviewReportScreen
+              extractedData={extractedData}
+              setExtractedData={setExtractedData}
+              userProfile={userProfile}
+              onContinueChat={() => go("agent-chat")}
+              onSubmit={async () => {
+                if (!sessionUser?.id) {
+                  window.alert(
+                    "Please sign in to save this report.",
+                  )
+                  return
+                }
+                if (!sathiCaseId) {
+                  throw new Error(
+                    "There is no active case to save. Start a new report and try again.",
+                  )
+                }
+                const caseRecord = await saveReviewedCase(
+                  sathiCaseId,
+                  extractedData,
+                  userProfile,
+                )
+                await handleCaseSubmitted(caseRecord)
+              }}
+              onBack={() => go("agent-chat")}
+            />
+          )}
+
+          {screen === "success" && (
+            <SuccessScreen
+              caseRecord={submittedCase}
+              onTrack={() => {
+                setActiveCase(submittedCase)
+                go("case-status")
+              }}
+              onHome={() => {
+                setActiveTab("home")
+                go("home")
+              }}
+            />
+          )}
+
+          {screen === "my-cases" && (
+            <MyCasesScreen
+              cases={userCases}
+              loading={casesLoading}
+              error={casesError}
+              onRetry={() => {
+                if (sessionUser?.id) void loadCases(sessionUser.id)
+              }}
+              onSelectCase={(c) => {
+                setActiveCase(c)
+                go("case-status")
+              }}
+              onNewReport={() => startNewReport()}
+            />
+          )}
+
+          {screen === "case-status" && (
+            <CaseStatusScreen
+              caseRecord={activeCase}
+              onBack={() => switchTab("my-cases")}
+            />
+          )}
+
+          {screen === "defend" && (
+            <DefendScreen
+              onStartReport={() => startNewReport()}
+            />
+          )}
+
+          {screen === "profile" && (
+            <ProfileScreen
+              userProfile={userProfile}
+              setUserProfile={setUserProfile}
+              language={language}
+              setLanguage={setLanguage}
+              onLogout={async () => {
+                await supabase.auth.signOut()
+                setSessionUser(null)
+                setUserProfile({
+                  displayName: "",
+                  phone: "",
+                  email: "",
+                  stateDistrict: "",
+                  language: "en",
+                })
+                setUserCases([])
+                go("auth")
+              }}
+              userId={sessionUser?.id}
+            />
+          )}
         </div>
 
-        {/* Bottom tab bar */}
-        {showTabBar && (
-          <TabBar active={activeTab} onSwitch={switchTab} />
-        )}
+        {/* Bottom Tab Bar */}
+        {showTabBar && <TabBar active={activeTab} onSwitch={switchTab} />}
 
-        {/* Home indicator */}
-        <div style={{ height: 24, background: showTabBar ? C.white : (screen === "splash" || screen === "listening" || screen === "processing" ? C.teal900 : C.bgCanvas), display: "flex", alignItems: "center", justifyContent: "center" }}>
-          <div style={{ width: 134, height: 5, background: showTabBar ? "#000" : "rgba(255,255,255,0.3)", borderRadius: 3, opacity: 0.2 }} />
+        {/* Home gesture bar */}
+        <div
+          style={{
+            height: 24,
+            background: showTabBar
+              ? C.white
+              : screen === "agent-chat"
+                ? C.teal900
+                : C.bgCanvas,
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+          }}
+        >
+          <div
+            style={{
+              width: 134,
+              height: 5,
+              background: showTabBar ? "#000" : "rgba(255,255,255,0.3)",
+              borderRadius: 3,
+              opacity: 0.2,
+            }}
+          />
         </div>
       </div>
+
     </div>
-  );
+  )
 }
 
-// ─── Splash ───────────────────────────────────────────────────────────────────
+// ─── Loading State ────────────────────────────────────────────────────────────
 
-function SplashScreen({ onDone }: { onDone: () => void }) {
-  const [visible, setVisible] = useState(false);
-
-  useEffect(() => {
-    setTimeout(() => setVisible(true), 100);
-    const timer = setTimeout(onDone, 2800);
-    return () => clearTimeout(timer);
-  }, []);
-
+function LoadingScreen() {
   return (
     <div
-      onClick={onDone}
       style={{
         flex: 1,
         background: C.teal900,
@@ -172,412 +503,785 @@ function SplashScreen({ onDone }: { onDone: () => void }) {
         flexDirection: "column",
         alignItems: "center",
         justifyContent: "center",
-        position: "relative",
-        overflow: "hidden",
-        cursor: "pointer",
       }}
     >
-      {/* Animated blobs */}
-      <FloatingBlobs />
-
-      {/* Logo content */}
-      <div style={{ position: "relative", zIndex: 2, textAlign: "center", padding: "0 32px", transition: "opacity 0.5s, transform 0.5s", opacity: visible ? 1 : 0, transform: visible ? "scale(1)" : "scale(0.9)" }}>
-        <div style={{ fontSize: 48, marginBottom: 8 }}>🛡️</div>
-        <h1 style={{
-          fontFamily: "'Poppins', sans-serif",
-          fontSize: 38,
-          fontWeight: 800,
+      <div style={{ fontSize: 44, marginBottom: 12 }}>🛡️</div>
+      <h2
+        style={{
           color: C.white,
-          margin: "0 0 8px",
-          letterSpacing: "-0.5px",
-        }}>
-          CyberSathi
-        </h1>
-        <p style={{ fontSize: 11, fontWeight: 600, color: C.mint300, letterSpacing: "0.2em", textTransform: "uppercase", margin: "0 0 16px" }}>
-          YOUR VOICE AGAINST SCAMS
-        </p>
-        <div style={{ width: 60, height: 2, background: `linear-gradient(90deg, ${C.mint300}, transparent)`, margin: "0 auto 20px", borderRadius: 1 }} />
-        <p style={{ fontSize: 14, color: "rgba(255,255,255,0.6)", fontStyle: "italic", transition: "opacity 0.5s", transitionDelay: "0.3s", opacity: visible ? 1 : 0 }}>
-          "Speak, we are listening"
-        </p>
-      </div>
-
-      <div style={{ position: "absolute", bottom: 40, left: 0, right: 0, textAlign: "center", opacity: 0.4 }}>
-        <div style={{ width: 20, height: 20, border: `2px solid ${C.mint300}`, borderRadius: "50%", margin: "0 auto", animation: "pulse 1.5s infinite" }} />
-      </div>
-
-      <style>{`@keyframes pulse { 0%,100% { transform:scale(1);opacity:0.4 } 50% { transform:scale(1.3);opacity:0.8 } }`}</style>
-    </div>
-  );
-}
-
-function FloatingBlobs() {
-  return (
-    <>
-      <style>{`
-        @keyframes float1 { 0%,100%{transform:translate(0,0)} 50%{transform:translate(6px,-8px)} }
-        @keyframes float2 { 0%,100%{transform:translate(0,0)} 50%{transform:translate(-8px,6px)} }
-        @keyframes float3 { 0%,100%{transform:translate(0,0)} 50%{transform:translate(5px,7px)} }
-      `}</style>
-      {[
-        { top: -60, right: -40, size: 200, color: C.teal500, delay: "0s", anim: "float1" },
-        { top: 40, right: 60, size: 120, color: C.mint300, delay: "0.5s", anim: "float2" },
-        { top: -20, right: 100, size: 80, color: C.teal700, delay: "1s", anim: "float3" },
-      ].map((b, i) => (
-        <div key={i} style={{
-          position: "absolute",
-          top: b.top,
-          right: b.right,
-          width: b.size,
-          height: b.size,
-          borderRadius: "50%",
-          background: `radial-gradient(circle at 40% 40%, ${b.color}80, ${b.color}20)`,
-          animationName: b.anim,
-          animationDuration: `${6 + i}s`,
-          animationDelay: b.delay,
-          animationTimingFunction: "ease-in-out",
-          animationIterationCount: "infinite",
-        }} />
-      ))}
-    </>
-  );
-}
-
-// ─── Language ─────────────────────────────────────────────────────────────────
-
-function LanguageScreen({ language, setLanguage, onNext }: { language: string; setLanguage: (l: "en" | "hi") => void; onNext: () => void }) {
-  const langs = [
-    { key: "en", label: "English", sub: "Primary Language" },
-    { key: "hi", label: "Hindi / हिंदी", sub: "Hindi Support" },
-    { key: "bn", label: "Bengali / বাংলা", sub: "Bengali Support" },
-  ];
-
-  return (
-    <OnboardShell step={1} title="Language" subtitle="Select your preferred language">
-      <InfoBanner text="We support voice inputs in multiple regional languages to make reporting seamless." />
-      <div style={{ display: "flex", flexDirection: "column", gap: 12, marginTop: 20 }}>
-        {langs.map((l) => (
-          <SelectableCard
-            key={l.key}
-            selected={language === l.key}
-            onSelect={() => setLanguage(l.key as "en" | "hi")}
-            label={l.label}
-            sub={l.sub}
-          />
-        ))}
-      </div>
-      <div style={{ marginTop: "auto", paddingTop: 32 }}>
-        <PrimaryButton label="Confirm Language" disabled={!language} onClick={onNext} />
-      </div>
-    </OnboardShell>
-  );
-}
-
-// ─── How it works ─────────────────────────────────────────────────────────────
-
-const HOW_SLIDES = [
-  { icon: "🎙️", title: "Just speak, no typing needed", desc: "Simply explain the incident in your own words. Sathi is trained to parse fraud descriptions and capture important facts automatically." },
-  { icon: "🔒", title: "Your data is protected", desc: "Your incident details stay private and isolated. Sathi processes them only to create your report and never stores or shares your data." },
-  { icon: "🤝", title: "Let's defeat cyber crime together", desc: "You are backed by a strong community that intends to help people stand against cyber crimes and raise their voice." },
-];
-
-function HowScreen({ slide, setSlide, onNext, language }: { slide: number; setSlide: (n: number) => void; onNext: () => void; language: string }) {
-  const s = HOW_SLIDES[slide];
-
-  return (
-    <OnboardShell step={2} title="How Sathi Works" subtitle="Learn what makes Sathi different">
-      <div style={{
-        background: C.white,
-        borderRadius: 20,
-        padding: "32px 24px",
-        textAlign: "center",
-        boxShadow: `0 8px 24px rgba(11,46,46,0.08)`,
-        flex: 1,
-        display: "flex",
-        flexDirection: "column",
-        alignItems: "center",
-        justifyContent: "center",
-        gap: 16,
-        minHeight: 280,
-      }}>
-        <div style={{ fontSize: 64 }}>{s.icon}</div>
-        <h2 style={{ fontFamily: "'Poppins', sans-serif", fontSize: 20, fontWeight: 700, color: C.textPrimary, margin: 0 }}>{s.title}</h2>
-        <p style={{ fontSize: 14, color: C.textSecondary, lineHeight: 1.6, margin: 0 }}>{s.desc}</p>
-      </div>
-
-      {/* Dots */}
-      <div style={{ display: "flex", justifyContent: "center", gap: 8, marginTop: 20 }}>
-        {HOW_SLIDES.map((_, i) => (
-          <div key={i} onClick={() => setSlide(i)} style={{
-            height: 8,
-            width: i === slide ? 24 : 8,
-            background: i === slide ? C.teal600 : "#ccc",
-            borderRadius: 4,
-            cursor: "pointer",
-            transition: "all 0.3s ease",
-          }} />
-        ))}
-      </div>
-
-      <div style={{ display: "flex", justifyContent: "space-between", marginTop: 20 }}>
-        <GhostButton label="Skip" onClick={onNext} />
-        <PrimaryButton
-          label={slide === 2 ? "Continue" : "Next Slide →"}
-          onClick={() => slide === 2 ? onNext() : setSlide(slide + 1)}
-          style={{ minWidth: 140 }}
-        />
-      </div>
-    </OnboardShell>
-  );
-}
-
-// ─── Permissions ──────────────────────────────────────────────────────────────
-
-function PermissionsScreen({ onNext, language }: { onNext: () => void; language: string }) {
-  const [perms, setPerms] = useState({ callLogs: false, sms: false, mic: true, recordings: true });
-
-  const toggle = (key: keyof typeof perms) => setPerms(p => ({ ...p, [key]: !p[key] }));
-
-  const rows = [
-    { key: "callLogs" as const, icon: "📞", title: "Call Logs", desc: "Used to cross-verify and flag active spam numbers." },
-    { key: "sms" as const, icon: "💬", title: "SMS Messages", desc: "Scans fake bank alerts and dangerous URLs." },
-    { key: "mic" as const, icon: "🎙️", title: "Microphone", desc: "Allows you to speak and explain incidents directly." },
-    { key: "recordings" as const, icon: "🎵", title: "Call Recordings", desc: "Turn on recording calls from unknown numbers." },
-  ];
-
-  return (
-    <OnboardShell step={3} title="Permissions" subtitle="Grant required access to proceed">
-      <div style={{ background: C.mint100, borderRadius: 16, padding: "14px 16px", display: "flex", gap: 12, alignItems: "center", marginBottom: 20 }}>
-        <div style={{ width: 40, height: 40, background: C.teal600, borderRadius: "50%", display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0, fontSize: 18 }}>🛡️</div>
-        <div>
-          <p style={{ margin: 0, fontWeight: 600, fontSize: 13, color: C.textPrimary }}>Permissions secure your identity</p>
-          <p style={{ margin: 0, fontSize: 12, color: C.textSecondary }}>These help verify scam logs automatically</p>
-        </div>
-      </div>
-
-      <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
-        {rows.map(r => (
-          <ToggleRow key={r.key} icon={r.icon} title={r.title} desc={r.desc} on={perms[r.key]} onToggle={() => toggle(r.key)} />
-        ))}
-      </div>
-
-      <div style={{ marginTop: "auto", paddingTop: 24, display: "flex", flexDirection: "column", gap: 12 }}>
-        <PrimaryButton label="🛡 Allow & Continue" onClick={onNext} />
-        <GhostButton label="Do this later" onClick={onNext} style={{ textAlign: "center" }} />
-      </div>
-    </OnboardShell>
-  );
-}
-
-// ─── OTP Screen ───────────────────────────────────────────────────────────────
-
-function OTPScreen({ onNext, language, isOnboarding = false }: { onNext: () => void; language: string; isOnboarding?: boolean }) {
-  const [digits, setDigits] = useState(["", "", "", "", "", ""]);
-  const [showDemo, setShowDemo] = useState(false);
-  const [autoFilling, setAutoFilling] = useState(false);
-  const [countdown, setCountdown] = useState(45);
-  const inputRefs = useRef<(HTMLInputElement | null)[]>([]);
-
-  useEffect(() => {
-    // Show demo popup after 1.2s
-    const t = setTimeout(() => setShowDemo(true), 1200);
-    return () => clearTimeout(t);
-  }, []);
-
-  useEffect(() => {
-    if (countdown > 0) {
-      const t = setTimeout(() => setCountdown(c => c - 1), 1000);
-      return () => clearTimeout(t);
-    }
-  }, [countdown]);
-
-  const handleAutoFill = () => {
-    setShowDemo(false);
-    setAutoFilling(true);
-    const otp = DEMO_OTP.split("");
-    otp.forEach((d, i) => {
-      setTimeout(() => {
-        setDigits(prev => {
-          const next = [...prev];
-          next[i] = d;
-          return next;
-        });
-        if (i < 5) inputRefs.current[i + 1]?.focus();
-      }, i * 180);
-    });
-    setTimeout(() => setAutoFilling(false), otp.length * 180 + 300);
-  };
-
-  const handleDigit = (i: number, val: string) => {
-    if (!/^\d?$/.test(val)) return;
-    const next = [...digits];
-    next[i] = val;
-    setDigits(next);
-    if (val && i < 5) inputRefs.current[i + 1]?.focus();
-  };
-
-  const filled = digits.every(d => d !== "");
-
-  const content = (
-    <>
-      {/* Lock icon */}
-      <div style={{ textAlign: "center", marginBottom: 24 }}>
-        <div style={{ width: 72, height: 72, borderRadius: "50%", background: `radial-gradient(circle, ${C.mint100}, ${C.mint300}40)`, display: "inline-flex", alignItems: "center", justifyContent: "center", fontSize: 32, boxShadow: `0 0 32px ${C.teal500}30` }}>
-          🔐
-        </div>
-      </div>
-
-      {/* Phone card */}
-      <div style={{ background: C.white, borderRadius: 16, padding: "14px 20px", display: "flex", alignItems: "center", gap: 12, marginBottom: 24, boxShadow: `0 4px 12px rgba(11,46,46,0.08)` }}>
-        <span style={{ fontSize: 24 }}>🇮🇳</span>
-        <div>
-          <p style={{ margin: 0, fontWeight: 600, color: C.textPrimary }}>+91 98765 43210</p>
-          <p style={{ margin: 0, fontSize: 12, color: C.textSecondary }}>OTP sent to your registered number</p>
-        </div>
-      </div>
-
-      {/* OTP boxes */}
-      <div style={{ display: "flex", gap: 8, justifyContent: "center", marginBottom: 20 }}>
-        {digits.map((d, i) => (
-          <input
-            key={i}
-            ref={el => { inputRefs.current[i] = el; }}
-            value={d}
-            onChange={e => handleDigit(i, e.target.value)}
-            maxLength={1}
-            style={{
-              width: 46,
-              height: 54,
-              borderRadius: 12,
-              border: `2px solid ${d ? C.teal600 : C.divider}`,
-              background: C.white,
-              fontSize: 22,
-              fontWeight: 700,
-              textAlign: "center",
-              color: C.textPrimary,
-              fontFeatureSettings: "'tnum'",
-              outline: "none",
-              transition: "border-color 0.15s, transform 0.12s",
-              transform: autoFilling && d ? "scale(1.08)" : "scale(1)",
-            }}
-          />
-        ))}
-      </div>
-
-      {/* Trust banner */}
-      <div style={{ background: C.mint100, borderRadius: 12, padding: "10px 14px", display: "flex", gap: 8, alignItems: "center", marginBottom: 24 }}>
-        <span style={{ fontSize: 14 }}>🛡️</span>
-        <div>
-          <p style={{ margin: 0, fontSize: 12, fontWeight: 600, color: C.teal600 }}>Verified report environment</p>
-          <p style={{ margin: 0, fontSize: 11, color: C.textSecondary }}>We confirm numbers to maintain scam data legitimacy.</p>
-        </div>
-      </div>
-
-      <PrimaryButton label="Verify & Continue" disabled={!filled} onClick={onNext} />
-
-      <p style={{ textAlign: "center", fontSize: 12, color: C.textSecondary, marginTop: 14 }}>
-        Didn't get code?{" "}
-        <span style={{ color: countdown === 0 ? C.teal600 : C.textSecondary, fontWeight: 600, cursor: countdown === 0 ? "pointer" : "default" }}>
-          {countdown === 0 ? "Resend OTP" : `Resend OTP in ${countdown}s`}
-        </span>
+          fontFamily: "'Poppins', sans-serif",
+          fontSize: 24,
+          fontWeight: 700,
+          margin: "0 0 6px",
+        }}
+      >
+        CyberSathi
+      </h2>
+      <p style={{ color: C.mint300, fontSize: 13, letterSpacing: "0.1em" }}>
+        CONNECTING TO SECURE SERVICES...
       </p>
+    </div>
+  )
+}
 
-      {/* Demo OTP popup */}
-      {showDemo && (
-        <DemoPopup
-          title="📱 Demo: OTP Received"
-          message={`Your CyberSathi verification code is`}
-          code={DEMO_OTP}
-          hint="Tap to auto-fill"
-          onFill={handleAutoFill}
-          onDismiss={() => setShowDemo(false)}
-        />
-      )}
-    </>
-  );
+// ─── Real Authentication Screen ───────────────────────────────────────────────
 
-  if (isOnboarding) {
-    return (
-      <OnboardShell step={4} title="OTP Verification" subtitle="Complete the final registration step">
-        {content}
-      </OnboardShell>
-    );
+function RealAuthScreen({
+  onAuthenticated,
+  language,
+}: {
+  onAuthenticated: (user: any) => void
+  language: string
+}) {
+  const [mode, setMode] = useState<"signin" | "signup">("signin")
+  const [email, setEmail] = useState("")
+  const [password, setPassword] = useState("")
+  const [name, setName] = useState("")
+  const [phone, setPhone] = useState("")
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState("")
+  const [notice, setNotice] = useState("")
+
+  const handleAuth = async (e: React.FormEvent) => {
+    e.preventDefault()
+    setError("")
+    setNotice("")
+    setBusy(true)
+
+    try {
+      const trimmedEmail = email.trim()
+      if (!trimmedEmail || !trimmedEmail.includes("@")) {
+        throw new Error("Please enter a valid email address.")
+      }
+      if (password.length < 6) {
+        throw new Error("Password must be at least 6 characters.")
+      }
+
+      if (mode === "signup") {
+        const cleanPhone = phone.trim()
+          ? phone.startsWith("+91")
+            ? phone.trim()
+            : `+91 ${phone.replace(/\D/g, "")}`
+          : ""
+        const { data, error: signUpErr } = await supabase.auth.signUp({
+          email: trimmedEmail,
+          password,
+          options: {
+            emailRedirectTo: window.location.origin,
+            data: {
+              full_name: name.trim() || trimmedEmail.split("@")[0],
+              displayName: name.trim() || trimmedEmail.split("@")[0],
+              phone_e164: cleanPhone,
+              preferred_language: language,
+            },
+          },
+        })
+
+        if (signUpErr) throw signUpErr
+
+        if (data.session?.user) {
+          onAuthenticated(data.session.user)
+        } else if (data.user) {
+          setNotice(
+            "Account created. Check your inbox and confirm your email before signing in.",
+          )
+          setMode("signin")
+        }
+      } else {
+        // Sign In
+        const { data, error: signInErr } =
+          await supabase.auth.signInWithPassword({
+            email: trimmedEmail,
+            password,
+          })
+
+        if (signInErr) throw signInErr
+
+        if (data.session?.user) {
+          onAuthenticated(data.session.user)
+        } else {
+          throw new Error(
+            "Could not create session. Please check your credentials.",
+          )
+        }
+      }
+    } catch (cause: any) {
+      setError(cause?.message || "Authentication error occurred.")
+    } finally {
+      setBusy(false)
+    }
   }
 
   return (
-    <ScreenShell title="OTP Verification" subtitle="Enter verification code" onBack={() => {}}>
-      {content}
-    </ScreenShell>
-  );
+    <div
+      style={{
+        flex: 1,
+        background: C.teal900,
+        display: "flex",
+        flexDirection: "column",
+      }}
+    >
+      <div style={{ padding: "28px 24px 20px", textAlign: "center" }}>
+        <div
+          style={{
+            width: 56,
+            height: 56,
+            borderRadius: "50%",
+            background: C.mint100,
+            display: "inline-flex",
+            alignItems: "center",
+            justifyContent: "center",
+            fontSize: 28,
+            marginBottom: 12,
+          }}
+        >
+          🛡️
+        </div>
+        <h1
+          style={{
+            fontFamily: "'Poppins', sans-serif",
+            fontSize: 24,
+            fontWeight: 700,
+            color: C.white,
+            margin: "0 0 4px",
+          }}
+        >
+          CyberSathi
+        </h1>
+        <p style={{ fontSize: 13, color: "rgba(255,255,255,0.6)", margin: 0 }}>
+          Official Cyber Crime Intake & Response Portal
+        </p>
+      </div>
+
+      <div
+        style={{
+          flex: 1,
+          background: C.white,
+          borderRadius: "32px 32px 0 0",
+          padding: "24px 20px",
+          overflowY: "auto",
+          display: "flex",
+          flexDirection: "column",
+        }}
+      >
+        {/* Mode Toggle */}
+        <div
+          style={{
+            display: "flex",
+            background: C.bgCanvas,
+            borderRadius: 12,
+            padding: 4,
+            marginBottom: 20,
+          }}
+        >
+          <button
+            type="button"
+            onClick={() => {
+              setMode("signin")
+              setError("")
+            }}
+            style={{
+              flex: 1,
+              padding: "10px 0",
+              border: 0,
+              borderRadius: 8,
+              background: mode === "signin" ? C.white : "transparent",
+              color: mode === "signin" ? C.teal900 : C.textSecondary,
+              fontWeight: 700,
+              fontSize: 14,
+              cursor: "pointer",
+              boxShadow:
+                mode === "signin" ? "0 2px 6px rgba(0,0,0,0.06)" : "none",
+            }}
+          >
+            Sign In
+          </button>
+          <button
+            type="button"
+            onClick={() => {
+              setMode("signup")
+              setError("")
+            }}
+            style={{
+              flex: 1,
+              padding: "10px 0",
+              border: 0,
+              borderRadius: 8,
+              background: mode === "signup" ? C.white : "transparent",
+              color: mode === "signup" ? C.teal900 : C.textSecondary,
+              fontWeight: 700,
+              fontSize: 14,
+              cursor: "pointer",
+              boxShadow:
+                mode === "signup" ? "0 2px 6px rgba(0,0,0,0.06)" : "none",
+            }}
+          >
+            Create Account
+          </button>
+        </div>
+
+        <form
+          onSubmit={handleAuth}
+          style={{ display: "flex", flexDirection: "column", gap: 14 }}
+        >
+          {mode === "signup" && (
+            <>
+              <div>
+                <label style={labelStyle} htmlFor="auth-name">
+                  Full Name (Legal Name)
+                </label>
+                <input
+                  id="auth-name"
+                  type="text"
+                  required
+                  autoComplete="name"
+                  value={name}
+                  onChange={(e) => setName(e.target.value)}
+                  placeholder="e.g. Ramesh Sharma"
+                  style={inputStyle}
+                />
+              </div>
+
+              <div>
+                <label style={labelStyle} htmlFor="auth-phone">
+                  Mobile Number
+                </label>
+                <div
+                  style={{
+                    display: "flex",
+                    alignItems: "center",
+                    gap: 8,
+                    ...inputStyle,
+                  }}
+                >
+                  <span style={{ color: C.textSecondary, fontWeight: 600 }}>
+                    +91
+                  </span>
+                  <input
+                    id="auth-phone"
+                    type="tel"
+                    inputMode="numeric"
+                    autoComplete="tel-national"
+                    value={phone}
+                    onChange={(e) =>
+                      setPhone(e.target.value.replace(/\D/g, "").slice(0, 10))
+                    }
+                    placeholder="10-digit mobile number"
+                    style={{
+                      border: 0,
+                      outline: "none",
+                      width: "100%",
+                      background: "transparent",
+                      font: "inherit",
+                      color: C.textPrimary,
+                    }}
+                  />
+                </div>
+              </div>
+            </>
+          )}
+
+          <div>
+            <label style={labelStyle} htmlFor="auth-email">
+              Official Email Address
+            </label>
+            <input
+              id="auth-email"
+              type="email"
+              required
+              autoComplete="email"
+              value={email}
+              onChange={(e) => setEmail(e.target.value)}
+              placeholder="e.g. citizen@example.com"
+              style={inputStyle}
+            />
+          </div>
+
+          <div>
+            <label style={labelStyle} htmlFor="auth-password">
+              Password
+            </label>
+            <input
+              id="auth-password"
+              type="password"
+              required
+              autoComplete={
+                mode === "signup" ? "new-password" : "current-password"
+              }
+              value={password}
+              onChange={(e) => setPassword(e.target.value)}
+              placeholder="Minimum 6 characters"
+              style={inputStyle}
+            />
+          </div>
+
+          {error && (
+            <div
+              style={{
+                background: "#FEE2E2",
+                border: `1px solid ${C.danger}40`,
+                borderRadius: 10,
+                padding: "10px 12px",
+                color: C.danger,
+                fontSize: 13,
+                lineHeight: 1.4,
+              }}
+            >
+              ⚠️ {error}
+            </div>
+          )}
+
+          {notice && (
+            <div
+              style={{
+                background: C.mint100,
+                border: `1px solid ${C.teal600}40`,
+                borderRadius: 10,
+                padding: "10px 12px",
+                color: C.teal700,
+                fontSize: 13,
+                lineHeight: 1.4,
+              }}
+            >
+              ✉️ {notice}
+              <button
+                type="button"
+                disabled={busy || !email.trim()}
+                onClick={async () => {
+                  setBusy(true)
+                  setError("")
+                  try {
+                    const { error: resendErr } = await supabase.auth.resend({
+                      type: "signup",
+                      email: email.trim(),
+                      options: { emailRedirectTo: window.location.origin },
+                    })
+                    if (resendErr) throw resendErr
+                    setNotice(
+                      "Confirmation email sent again. Check your inbox and spam folder.",
+                    )
+                  } catch (cause: any) {
+                    setError(
+                      cause?.message || "Could not resend confirmation email.",
+                    )
+                  } finally {
+                    setBusy(false)
+                  }
+                }}
+                style={{
+                  display: "block",
+                  marginTop: 8,
+                  background: "transparent",
+                  border: "none",
+                  padding: 0,
+                  color: C.teal600,
+                  fontWeight: 700,
+                  cursor: "pointer",
+                  fontSize: 12,
+                }}
+              >
+                Resend confirmation email
+              </button>
+            </div>
+          )}
+
+          <div style={{ marginTop: 8 }}>
+            <PrimaryButton
+              label={
+                busy
+                  ? "Processing..."
+                  : mode === "signin"
+                    ? "Sign In to Cyber Sathi"
+                    : "Register Official Account"
+              }
+              disabled={busy}
+              onClick={() => {}}
+            />
+          </div>
+        </form>
+
+        <p
+          style={{
+            marginTop: "auto",
+            paddingTop: 20,
+            fontSize: 11,
+            color: C.textSecondary,
+            textAlign: "center",
+            lineHeight: 1.5,
+          }}
+        >
+          🔒 Connected to official Supabase Authentication with Row Level
+          Security.
+        </p>
+      </div>
+    </div>
+  )
 }
 
-// ─── Home / Assistant ─────────────────────────────────────────────────────────
+// ─── Profile Setup ────────────────────────────────────────────────────────────
 
-function HomeScreen({ onStartReport, onCaseStatus, language }: { onStartReport: () => void; onCaseStatus: () => void; language: string }) {
-  const [dismissed, setDismissed] = useState(false);
-  const [pulse, setPulse] = useState(false);
+function ProfileSetupScreen({
+  userId,
+  userProfile,
+  setUserProfile,
+  onDone,
+  language,
+}: {
+  userId?: string
+  userProfile: any
+  setUserProfile: any
+  onDone: () => void
+  language: string
+}) {
+  const [name, setName] = useState(userProfile.displayName || "")
+  const [phone, setPhone] = useState(
+    userProfile.phone.replace("+91 ", "") || "",
+  )
+  const [stateDistrict, setStateDistrict] = useState(
+    userProfile.stateDistrict || "",
+  )
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState("")
 
-  useEffect(() => {
-    const t = setInterval(() => setPulse(p => !p), 1100);
-    return () => clearInterval(t);
-  }, []);
+  const handleSave = async () => {
+    if (name.trim().length < 2) {
+      setError("Please enter your legal name for the report.")
+      return
+    }
 
-  const shortcuts = [
-    { icon: "💸", label: "Lost Money", sub: "Unauthorized deduction" },
-    { icon: "📵", label: "Spam Caller", sub: "Threats or fake rewards" },
-    { icon: "🌐", label: "Fake Website", sub: "Phishing links" },
-    { icon: "📞", label: "Fake Calls", sub: "Impersonating known ones" },
-  ];
+    setBusy(true)
+    setError("")
+
+    try {
+      const cleanPhone = phone.trim()
+        ? phone.startsWith("+91")
+          ? phone.trim()
+          : `+91 ${phone.replace(/\D/g, "")}`
+        : ""
+      const updated = {
+        displayName: name.trim(),
+        phone: cleanPhone,
+        email: userProfile.email,
+        stateDistrict: stateDistrict.trim(),
+        language,
+      }
+
+      setUserProfile(updated)
+
+      if (userId) {
+        await updateProfile(userId, { full_name: name.trim() })
+      }
+
+      await supabase.auth.updateUser({
+        data: {
+          full_name: name.trim(),
+          displayName: name.trim(),
+          phone_e164: cleanPhone,
+          state_district: stateDistrict.trim(),
+        },
+      })
+
+      onDone()
+    } catch (err: any) {
+      setError(err?.message || "Could not update profile.")
+    } finally {
+      setBusy(false)
+    }
+  }
 
   return (
-    <div style={{ flex: 1, overflowY: "auto", background: C.bgCanvas, padding: "0 20px 20px" }}>
-      {/* Scam alert banner */}
-      {!dismissed && (
-        <div style={{ background: C.warning, borderRadius: 14, padding: "12px 14px", display: "flex", alignItems: "flex-start", gap: 8, marginBottom: 16, marginTop: 8 }}>
-          <span style={{ fontSize: 16, flexShrink: 0 }}>⚠️</span>
-          <div style={{ flex: 1 }}>
-            <p style={{ margin: 0, fontSize: 12, fontWeight: 600, color: "#7a4d00" }}>Scam Alert: Electricity Bill SMS</p>
-            <p style={{ margin: 0, fontSize: 11, color: "#7a4d00" }}>Be careful of text warnings threatening utility disconnection.</p>
-          </div>
-          <span onClick={() => setDismissed(true)} style={{ cursor: "pointer", fontSize: 14, color: "#7a4d00", opacity: 0.6 }}>✕</span>
+    <div
+      style={{
+        flex: 1,
+        background: C.white,
+        display: "flex",
+        flexDirection: "column",
+        padding: "28px 20px",
+      }}
+    >
+      <div style={{ textAlign: "center", marginBottom: 24 }}>
+        <div
+          style={{
+            width: 64,
+            height: 64,
+            borderRadius: "50%",
+            background: C.mint100,
+            display: "inline-flex",
+            alignItems: "center",
+            justifyContent: "center",
+            fontSize: 32,
+            marginBottom: 8,
+          }}
+        >
+          👤
         </div>
-      )}
+        <h2
+          style={{
+            margin: "0 0 6px",
+            fontSize: 20,
+            fontWeight: 700,
+            color: C.textPrimary,
+            fontFamily: "'Poppins', sans-serif",
+          }}
+        >
+          Complainant Profile
+        </h2>
+        <p style={{ margin: 0, fontSize: 13, color: C.textSecondary }}>
+          Used to prepare your report and identify the relevant jurisdiction
+        </p>
+      </div>
 
-      {/* Prompt card */}
-      <div style={{ background: C.mint100, borderRadius: 20, padding: "18px 20px", display: "flex", gap: 14, alignItems: "center", marginBottom: 24 }}>
-        <div style={{ width: 48, height: 48, background: C.teal600, borderRadius: "50%", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 22, flexShrink: 0 }}>🎙️</div>
+      <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
         <div>
-          <p style={{ margin: "0 0 2px", fontWeight: 600, color: C.textPrimary, fontSize: 14 }}>Tap and tell Sathi what happened</p>
-          <p style={{ margin: 0, fontSize: 12, color: C.textSecondary }}>Explain the cyber fraud incident in simple {language === "hi" ? "Hindi" : "English"}</p>
+          <label style={labelStyle} htmlFor="setup-name">
+            Legal Full Name
+          </label>
+          <input
+            id="setup-name"
+            type="text"
+            value={name}
+            onChange={(e) => setName(e.target.value)}
+            placeholder="As per Aadhaar / PAN"
+            style={inputStyle}
+          />
+        </div>
+
+        <div>
+          <label style={labelStyle} htmlFor="setup-phone">
+            Contact Mobile Number
+          </label>
+          <div
+            style={{
+              display: "flex",
+              alignItems: "center",
+              gap: 8,
+              ...inputStyle,
+            }}
+          >
+            <span style={{ color: C.textSecondary, fontWeight: 600 }}>+91</span>
+            <input
+              id="setup-phone"
+              type="tel"
+              value={phone}
+              onChange={(e) =>
+                setPhone(e.target.value.replace(/\D/g, "").slice(0, 10))
+              }
+              placeholder="10-digit mobile number"
+              style={{
+                border: 0,
+                outline: "none",
+                width: "100%",
+                background: "transparent",
+                font: "inherit",
+                color: C.textPrimary,
+              }}
+            />
+          </div>
+        </div>
+
+        <div>
+          <label style={labelStyle} htmlFor="setup-location">
+            State & District Jurisdiction
+          </label>
+          <input
+            id="setup-location"
+            type="text"
+            value={stateDistrict}
+            onChange={(e) => setStateDistrict(e.target.value)}
+            placeholder="e.g. Maharashtra, Mumbai Suburban"
+            style={inputStyle}
+          />
+        </div>
+
+        {error && (
+          <p style={{ color: C.danger, fontSize: 13, margin: 0 }}>{error}</p>
+        )}
+
+        <div style={{ marginTop: 24 }}>
+          <PrimaryButton
+            label={busy ? "Saving Profile..." : "Save & Continue to Dashboard"}
+            disabled={busy || name.trim().length < 2}
+            onClick={handleSave}
+          />
+        </div>
+      </div>
+    </div>
+  )
+}
+
+// ─── Home Screen ──────────────────────────────────────────────────────────────
+
+function HomeScreen({
+  onStartReport,
+  onViewCase,
+  recentCases,
+  language,
+}: {
+  onStartReport: (topic?: string) => void
+  onViewCase: (c: CaseRecord) => void
+  recentCases: CaseRecord[]
+  language: string
+}) {
+  const [pulse, setPulse] = useState(false)
+
+  useEffect(() => {
+    const t = setInterval(() => setPulse((p) => !p), 1200)
+    return () => clearInterval(t)
+  }, [])
+
+  const topics = [
+    {
+      icon: "💸",
+      label: "Lost Money / UPI Fraud",
+      desc: "Unauthorized debit or QR scan",
+    },
+    {
+      icon: "⚡",
+      label: "Utility / Electricity Bill",
+      desc: "SMS threatening disconnection",
+    },
+    {
+      icon: "💼",
+      label: "Part-Time Job / Telegram",
+      desc: "Fake task or investment schemes",
+    },
+    {
+      icon: "🛑",
+      label: "Blackmail / Digital Arrest",
+      desc: "Video call or police impersonation",
+    },
+  ]
+
+  return (
+    <div
+      style={{
+        flex: 1,
+        overflowY: "auto",
+        background: C.bgCanvas,
+        padding: "14px 20px 24px",
+      }}
+    >
+      {/* Top Advisory Banner */}
+      <div
+        style={{
+          background: C.warning,
+          borderRadius: 14,
+          padding: "12px 14px",
+          display: "flex",
+          alignItems: "center",
+          gap: 10,
+          marginBottom: 16,
+        }}
+      >
+        <span style={{ fontSize: 20 }}>🚨</span>
+        <div style={{ flex: 1 }}>
+          <p
+            style={{
+              margin: "0 0 2px",
+              fontSize: 12,
+              fontWeight: 700,
+              color: "#7a4d00",
+            }}
+          >
+            Golden Hour Alert: Helpline 1930
+          </p>
+          <p
+            style={{
+              margin: 0,
+              fontSize: 11,
+              color: "#7a4d00",
+              lineHeight: 1.4,
+            }}
+          >
+            Report financial fraud within 2 hours to freeze fraudulent money
+            before withdrawal.
+          </p>
         </div>
       </div>
 
-      {/* Mic orb */}
-      <div style={{ display: "flex", flexDirection: "column", alignItems: "center", marginBottom: 28 }}>
-        <div style={{ position: "relative", marginBottom: 12 }}>
-          {/* Pulse rings */}
-          <div style={{
-            position: "absolute", inset: -20,
+      {/* Prompt Card */}
+      <div
+        style={{
+          background: C.mint100,
+          borderRadius: 20,
+          padding: "18px 20px",
+          display: "flex",
+          gap: 14,
+          alignItems: "center",
+          marginBottom: 24,
+        }}
+      >
+        <div
+          style={{
+            width: 44,
+            height: 44,
+            background: C.teal600,
             borderRadius: "50%",
-            border: `2px solid ${C.teal500}`,
-            opacity: pulse ? 0.15 : 0.35,
-            transform: pulse ? "scale(1.15)" : "scale(1)",
-            transition: "opacity 1.1s ease, transform 1.1s ease",
-          }} />
-          <div style={{
-            position: "absolute", inset: -10,
-            borderRadius: "50%",
-            border: `2px solid ${C.teal600}`,
-            opacity: pulse ? 0.2 : 0.4,
-            transform: pulse ? "scale(1.08)" : "scale(1)",
-            transition: "opacity 1.1s ease, transform 1.1s ease",
-          }} />
-          {/* Main orb */}
-          <button
-            onClick={onStartReport}
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+            fontSize: 20,
+            flexShrink: 0,
+          }}
+        >
+          🎙️
+        </div>
+        <div>
+          <p
             style={{
-              width: 96,
-              height: 96,
+              margin: "0 0 2px",
+              fontWeight: 700,
+              color: C.textPrimary,
+              fontSize: 14,
+            }}
+          >
+            Speak or Chat with Sathi
+          </p>
+          <p
+            style={{
+              margin: 0,
+              fontSize: 12,
+              color: C.textSecondary,
+              lineHeight: 1.4,
+            }}
+          >
+            Describe the incident in{" "}
+            {language === "hi"
+              ? "Hindi"
+              : language === "bn"
+                ? "Bengali"
+                : "English"}
+            . Sathi formats your legal report.
+          </p>
+        </div>
+      </div>
+
+      {/* Main Mic / Action Orb */}
+      <div
+        style={{
+          display: "flex",
+          flexDirection: "column",
+          alignItems: "center",
+          marginBottom: 28,
+        }}
+      >
+        <div style={{ position: "relative", marginBottom: 12 }}>
+          <div
+            style={{
+              position: "absolute",
+              inset: -18,
+              borderRadius: "50%",
+              border: `2px solid ${C.teal500}`,
+              opacity: pulse ? 0.2 : 0.45,
+              transform: pulse ? "scale(1.12)" : "scale(1)",
+              transition: "opacity 1.2s ease, transform 1.2s ease",
+            }}
+          />
+          <button
+            onClick={() => onStartReport()}
+            style={{
+              width: 92,
+              height: 92,
               borderRadius: "50%",
               background: `linear-gradient(135deg, ${C.teal600}, ${C.teal500})`,
               border: "none",
@@ -586,1134 +1290,2349 @@ function HomeScreen({ onStartReport, onCaseStatus, language }: { onStartReport: 
               alignItems: "center",
               justifyContent: "center",
               fontSize: 36,
-              boxShadow: `0 8px 32px ${C.teal600}60`,
-              transform: "scale(1)",
-              transition: "transform 0.15s",
+              boxShadow: `0 8px 30px ${C.teal600}60`,
             }}
-            onMouseDown={e => (e.currentTarget.style.transform = "scale(0.94)")}
-            onMouseUp={e => (e.currentTarget.style.transform = "scale(1)")}
           >
             🎙️
           </button>
         </div>
-        <p style={{ fontSize: 12, color: C.textSecondary, margin: 0 }}>Tap Center Orb to Speak</p>
+        <p
+          style={{ fontSize: 13, fontWeight: 600, color: C.teal700, margin: 0 }}
+        >
+          Tap Orb to Start Incident Intake
+        </p>
       </div>
 
-      {/* Shortcuts */}
-      <p style={{ fontSize: 11, fontWeight: 600, color: C.textSecondary, letterSpacing: "0.08em", textTransform: "uppercase", margin: "0 0 12px" }}>Common Scam Topics</p>
-      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
-        {shortcuts.map((s, i) => (
-          <div key={i} onClick={onStartReport} style={{
+      {/* Common Scam Incident Categories */}
+      <p
+        style={{
+          fontSize: 11,
+          fontWeight: 700,
+          color: C.textSecondary,
+          letterSpacing: "0.08em",
+          textTransform: "uppercase",
+          margin: "0 0 12px",
+        }}
+      >
+        Report By Category
+      </p>
+      <div
+        style={{
+          display: "grid",
+          gridTemplateColumns: "1fr 1fr",
+          gap: 10,
+          marginBottom: 24,
+        }}
+      >
+        {topics.map((t, idx) => (
+          <div
+            key={idx}
+            onClick={() => onStartReport(t.label)}
+            style={{
+              background: C.white,
+              borderRadius: 14,
+              padding: "14px",
+              cursor: "pointer",
+              boxShadow: "0 2px 8px rgba(11,46,46,0.06)",
+              border: `1px solid ${C.divider}`,
+            }}
+          >
+            <div style={{ fontSize: 24, marginBottom: 6 }}>{t.icon}</div>
+            <p
+              style={{
+                margin: "0 0 3px",
+                fontSize: 13,
+                fontWeight: 700,
+                color: C.textPrimary,
+              }}
+            >
+              {t.label}
+            </p>
+            <p
+              style={{
+                margin: 0,
+                fontSize: 11,
+                color: C.textSecondary,
+                lineHeight: 1.3,
+              }}
+            >
+              {t.desc}
+            </p>
+          </div>
+        ))}
+      </div>
+
+      {/* Recent Real Cases Section */}
+      {recentCases.length > 0 && (
+        <div>
+          <p
+            style={{
+              fontSize: 11,
+              fontWeight: 700,
+              color: C.textSecondary,
+              letterSpacing: "0.08em",
+              textTransform: "uppercase",
+              margin: "0 0 10px",
+            }}
+          >
+            Your Filed Complaints ({recentCases.length})
+          </p>
+          {recentCases.slice(0, 2).map((c) => (
+            <div
+              key={c.id}
+              onClick={() => onViewCase(c)}
+              style={{
+                background: C.white,
+                borderRadius: 14,
+                padding: "12px 14px",
+                marginBottom: 10,
+                cursor: "pointer",
+                border: `1px solid ${C.divider}`,
+                display: "flex",
+                justifyContent: "space-between",
+                alignItems: "center",
+              }}
+            >
+              <div>
+                <p
+                  style={{
+                    margin: "0 0 2px",
+                    fontSize: 13,
+                    fontWeight: 700,
+                    color: C.textPrimary,
+                  }}
+                >
+                  {c.category}
+                </p>
+                <p style={{ margin: 0, fontSize: 11, color: C.textSecondary }}>
+                  {c.trackingNumber || `Case ID: ${c.id}`} •{" "}
+                  {c.amount || "Amount not provided"}
+                </p>
+              </div>
+              <span
+                style={{
+                  fontSize: 10,
+                  fontWeight: 700,
+                  background: C.mint100,
+                  color: C.teal700,
+                  padding: "4px 8px",
+                  borderRadius: 8,
+                }}
+              >
+                {c.status}
+              </span>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  )
+}
+
+function audioBufferToWav(audio: AudioBuffer): ArrayBuffer {
+  const channels = 1
+  const samples = audio.getChannelData(0)
+  const buffer = new ArrayBuffer(44 + samples.length * 2)
+  const view = new DataView(buffer)
+  const write = (offset: number, value: string) => {
+    for (let i = 0; i < value.length; i++) view.setUint8(offset + i, value.charCodeAt(i))
+  }
+  write(0, "RIFF")
+  view.setUint32(4, 36 + samples.length * 2, true)
+  write(8, "WAVE")
+  write(12, "fmt ")
+  view.setUint32(16, 16, true)
+  view.setUint16(20, 1, true)
+  view.setUint16(22, channels, true)
+  view.setUint32(24, audio.sampleRate, true)
+  view.setUint32(28, audio.sampleRate * channels * 2, true)
+  view.setUint16(32, channels * 2, true)
+  view.setUint16(34, 16, true)
+  write(36, "data")
+  view.setUint32(40, samples.length * 2, true)
+  let offset = 44
+  for (const sample of samples) {
+    const value = Math.max(-1, Math.min(1, sample))
+    view.setInt16(offset, value < 0 ? value * 0x8000 : value * 0x7fff, true)
+    offset += 2
+  }
+  return buffer
+}
+
+// ─── Real Agent Conversation Screen ───────────────────────────────────────────
+
+function AgentChatScreen({
+  messages,
+  setMessages,
+  extractedData,
+  setExtractedData,
+  caseId,
+  previousFacts,
+  setPreviousFacts,
+  language,
+  onProceedToReview,
+  onBack,
+}: {
+  messages: ChatMessage[]
+  setMessages: React.Dispatch<React.SetStateAction<ChatMessage[]>>
+  extractedData: ExtractedCaseData
+  setExtractedData: React.Dispatch<React.SetStateAction<ExtractedCaseData>>
+  caseId: string | null
+  previousFacts: SathiFacts | null
+  setPreviousFacts: React.Dispatch<React.SetStateAction<SathiFacts | null>>
+  language: "en" | "hi" | "bn"
+  onProceedToReview: () => void
+  onBack: () => void
+}) {
+  const [inputText, setInputText] = useState("")
+  const [isListening, setIsListening] = useState(false)
+  const [loadingReply, setLoadingReply] = useState(false)
+  const [showExtractedPanel, setShowExtractedPanel] = useState(false)
+  const messagesEndRef = useRef<HTMLDivElement>(null)
+  const recorderRef = useRef<MediaRecorder | null>(null)
+  const audioChunksRef = useRef<Blob[]>([])
+  const speechAudioRef = useRef<HTMLAudioElement | null>(null)
+  const lastSpokenReplyRef = useRef<string | null>(null)
+
+  useEffect(() => {
+    messagesEndRef.current?.scrollIntoView({ behavior: "smooth" })
+  }, [messages, loadingReply])
+
+  useEffect(
+    () => () => {
+      speechAudioRef.current?.pause()
+      if (speechAudioRef.current?.src.startsWith("blob:"))
+        URL.revokeObjectURL(speechAudioRef.current.src)
+    },
+    [],
+  )
+
+  const speakReply = async (text: string) => {
+    if (!caseId) return
+    try {
+      const wav = await generateSathiSpeech(caseId, text, language)
+      const url = URL.createObjectURL(wav)
+      const player = new Audio(url)
+      speechAudioRef.current?.pause()
+      speechAudioRef.current = player
+      player.onended = () => URL.revokeObjectURL(url)
+      await player.play()
+    } catch {
+      if ("speechSynthesis" in window) {
+        window.speechSynthesis.cancel()
+        const utterance = new SpeechSynthesisUtterance(text)
+        utterance.lang = language === "hi" ? "hi-IN" : language === "bn" ? "bn-IN" : "en-IN"
+        window.speechSynthesis.speak(utterance)
+      }
+    }
+  }
+
+  useEffect(() => {
+    const latest = messages[messages.length - 1]
+    if (
+      caseId &&
+      latest?.sender === "agent" &&
+      latest.id !== lastSpokenReplyRef.current
+    ) {
+      lastSpokenReplyRef.current = latest.id
+      void speakReply(latest.text)
+    }
+  }, [messages, caseId, language])
+
+  const submitTurn = async (input: { text?: string; audio?: Blob }) => {
+    if (!caseId || loadingReply) return
+    const text = input.text?.trim()
+    const userMsg: ChatMessage = {
+      id: `msg-${Date.now()}`,
+      sender: "user",
+      text: text || "🎙️ Voice message",
+      timestamp: new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }),
+    }
+    setMessages((prev) => [...prev, userMsg])
+    setLoadingReply(true)
+    try {
+      const response: SathiResponse = await sendSathiTurn(caseId, { language, text, audio: input.audio })
+      setExtractedData((current) =>
+        mergeSathiFactsIntoReport(current, response.facts, previousFacts),
+      )
+      setPreviousFacts(response.facts)
+      if (response.reply) {
+        setMessages((prev) => [...prev, {
+          id: `agent-${Date.now()}`, sender: "agent", text: response.reply!,
+          timestamp: new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }),
+        }])
+      }
+    } catch (error) {
+      setMessages((prev) => [...prev, {
+        id: `agent-error-${Date.now()}`, sender: "agent",
+        text: error instanceof Error ? error.message : "Sathi could not process that message. Please try again.",
+        timestamp: new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }),
+      }])
+    } finally {
+      setLoadingReply(false)
+    }
+  }
+
+  const toggleMic = async () => {
+    if (isListening && recorderRef.current) {
+      recorderRef.current.stop()
+      setIsListening(false)
+      return
+    }
+    if (!navigator.mediaDevices?.getUserMedia || typeof MediaRecorder === "undefined") {
+      window.alert("Microphone recording is unavailable here. Please type your message.")
+      return
+    }
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true })
+      const recorder = new MediaRecorder(stream)
+      recorderRef.current = recorder
+      audioChunksRef.current = []
+      recorder.ondataavailable = (event) => { if (event.data.size) audioChunksRef.current.push(event.data) }
+      recorder.onstop = () => {
+        const recorded = new Blob(audioChunksRef.current, { type: recorder.mimeType || "audio/webm" })
+        stream.getTracks().forEach((track) => track.stop())
+        if (recorded.size) void recorded.arrayBuffer().then(async (buffer) => {
+          const AudioContextClass = window.AudioContext || (window as any).webkitAudioContext
+          const context = new AudioContextClass()
+          try {
+            const decoded = await context.decodeAudioData(buffer)
+            void submitTurn({ audio: new Blob([audioBufferToWav(decoded)], { type: "audio/wav" }) })
+          } catch {
+            setMessages((prev) => [...prev, {
+              id: `agent-audio-error-${Date.now()}`, sender: "agent",
+              text: "I couldn't read that recording. Please try again or type your message.",
+              timestamp: new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }),
+            }])
+          } finally {
+            await context.close()
+          }
+        })
+      }
+      recorder.start()
+      setIsListening(true)
+    } catch {
+      window.alert("Microphone access was denied or is unavailable. You can type your message instead.")
+    }
+  }
+
+  const handleSend = async () => {
+    const text = inputText.trim()
+    if (!text || loadingReply) return
+    setInputText("")
+    void submitTurn({ text })
+  }
+
+  const hasAnyData = Boolean(
+    Boolean(extractedData.amount) ||
+      extractedData.suspectPhone ||
+      extractedData.suspectUpi ||
+      messages.length > 2,
+  )
+
+  return (
+    <div
+      style={{
+        flex: 1,
+        display: "flex",
+        flexDirection: "column",
+        background: C.bgCanvas,
+      }}
+    >
+      {/* Dark Agent Header */}
+      <div
+        style={{
+          background: C.teal900,
+          padding: "12px 18px",
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "space-between",
+        }}
+      >
+        <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+          <button
+            onClick={onBack}
+            style={{
+              background: "none",
+              border: "none",
+              color: C.white,
+              fontSize: 20,
+              cursor: "pointer",
+              padding: "4px 8px",
+            }}
+          >
+            ‹
+          </button>
+          <div>
+            <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+              <div
+                style={{
+                  width: 8,
+                  height: 8,
+                  borderRadius: "50%",
+                  background: C.mint300,
+                }}
+              />
+              <span style={{ color: C.white, fontWeight: 700, fontSize: 15 }}>
+                Cyber Sathi AI
+              </span>
+            </div>
+            <p
+              style={{
+                margin: 0,
+                fontSize: 11,
+                color: "rgba(255,255,255,0.6)",
+              }}
+            >
+              Official Cyber Crime Intake Agent
+            </p>
+          </div>
+        </div>
+
+        <div style={{ display: "flex", gap: 8 }}>
+          <button
+            onClick={() => setShowExtractedPanel((p) => !p)}
+            style={{
+              background: "rgba(255,255,255,0.15)",
+              border: "none",
+              borderRadius: 8,
+              padding: "6px 10px",
+              color: C.mint300,
+              fontSize: 11,
+              fontWeight: 700,
+              cursor: "pointer",
+            }}
+          >
+            📋 Facts {hasAnyData ? "✓" : ""}
+          </button>
+
+        </div>
+      </div>
+
+      {/* Extracted Facts Drawer (Collapsible) */}
+      {showExtractedPanel && (
+        <div
+          style={{
+            background: C.mint100,
+            padding: "12px 16px",
+            borderBottom: `1px solid ${C.divider}`,
+            animation: "fadeIn 0.2s",
+          }}
+        >
+          <div
+            style={{
+              display: "flex",
+              justifyContent: "space-between",
+              marginBottom: 6,
+            }}
+          >
+            <span
+              style={{
+                fontSize: 11,
+                fontWeight: 700,
+                color: C.teal700,
+                letterSpacing: "0.06em",
+                textTransform: "uppercase",
+              }}
+            >
+              Extracted Case Intelligence
+            </span>
+            <span
+              onClick={() => setShowExtractedPanel(false)}
+              style={{ fontSize: 11, color: C.teal700, cursor: "pointer" }}
+            >
+              ✕
+            </span>
+          </div>
+          <div
+            style={{
+              display: "grid",
+              gridTemplateColumns: "1fr 1fr",
+              gap: 8,
+              fontSize: 11,
+            }}
+          >
+            <div>
+              <span style={{ color: C.textSecondary }}>Category:</span>{" "}
+              <strong>{extractedData.category}</strong>
+            </div>
+            <div>
+              <span style={{ color: C.textSecondary }}>Loss:</span>{" "}
+              <strong style={{ color: C.danger }}>
+                {extractedData.amount}
+              </strong>
+            </div>
+            <div>
+              <span style={{ color: C.textSecondary }}>Suspect Phone:</span>{" "}
+              <strong>{extractedData.suspectPhone || "Pending"}</strong>
+            </div>
+            <div>
+              <span style={{ color: C.textSecondary }}>Suspect UPI:</span>{" "}
+              <strong>{extractedData.suspectUpi || "Pending"}</strong>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Chat Messages Container */}
+      <div
+        style={{
+          flex: 1,
+          overflowY: "auto",
+          padding: "16px 16px",
+          display: "flex",
+          flexDirection: "column",
+          gap: 12,
+        }}
+      >
+        {messages.map((m) => {
+          const isAgent = m.sender === "agent"
+          return (
+            <div
+              key={m.id}
+              style={{
+                display: "flex",
+                flexDirection: "column",
+                alignItems: isAgent ? "flex-start" : "flex-end",
+                maxWidth: "88%",
+                alignSelf: isAgent ? "flex-start" : "flex-end",
+              }}
+            >
+              <div
+                style={{
+                  background: isAgent ? C.white : C.teal600,
+                  color: isAgent ? C.textPrimary : C.white,
+                  borderRadius: isAgent
+                    ? "18px 18px 18px 4px"
+                    : "18px 18px 4px 18px",
+                  padding: "12px 16px",
+                  boxShadow: "0 2px 8px rgba(0,0,0,0.06)",
+                  border: isAgent ? `1px solid ${C.divider}` : "none",
+                  fontSize: 14,
+                  lineHeight: 1.5,
+                  whiteSpace: "pre-wrap",
+                }}
+              >
+                {m.text}
+              </div>
+              <span
+                style={{
+                  fontSize: 10,
+                  color: C.textSecondary,
+                  marginTop: 4,
+                  padding: "0 4px",
+                }}
+              >
+                {m.timestamp}
+              </span>
+            </div>
+          )
+        })}
+
+        {loadingReply && (
+          <div
+            style={{
+              display: "flex",
+              alignItems: "center",
+              gap: 8,
+              padding: "8px 12px",
+              background: C.white,
+              borderRadius: 16,
+              width: "fit-content",
+              border: `1px solid ${C.divider}`,
+            }}
+          >
+            <div
+              style={{
+                width: 8,
+                height: 8,
+                borderRadius: "50%",
+                background: C.teal600,
+                animation: "blink 1s infinite",
+              }}
+            />
+            <span style={{ fontSize: 12, color: C.textSecondary }}>
+              Sathi is analyzing incident details...
+            </span>
+          </div>
+        )}
+
+        <div ref={messagesEndRef} />
+      </div>
+
+      {/* Keep the intake open for corrections and extra details before review. */}
+      {hasAnyData && (
+        <div
+          style={{
+            padding: "8px 16px",
+            background: C.white,
+            borderTop: `1px solid ${C.divider}`,
+          }}
+        >
+          <p
+            style={{
+              margin: "0 0 8px",
+              textAlign: "center",
+              fontSize: 11,
+              color: C.textSecondary,
+            }}
+          >
+            Add corrections or missing details in the chat above before reviewing.
+          </p>
+          <button
+            onClick={onProceedToReview}
+            style={{
+              width: "100%",
+              padding: "12px",
+              borderRadius: 24,
+              border: "none",
+              background: `linear-gradient(135deg, ${C.teal700}, ${C.teal600})`,
+              color: C.white,
+              fontWeight: 700,
+              fontSize: 14,
+              cursor: "pointer",
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "center",
+              gap: 8,
+              boxShadow: "0 4px 12px rgba(11,46,46,0.15)",
+            }}
+          >
+            <span>Review & edit report</span>
+            <span>→</span>
+          </button>
+        </div>
+      )}
+
+      {/* Input Row */}
+      <div
+        style={{
+          padding: "10px 16px 14px",
+          background: C.white,
+          borderTop: `1px solid ${C.divider}`,
+          display: "flex",
+          alignItems: "center",
+          gap: 8,
+        }}
+      >
+        <button
+          type="button"
+          onClick={toggleMic}
+          disabled={!caseId || loadingReply}
+          style={{
+            width: 44,
+            height: 44,
+            borderRadius: "50%",
+            border: "none",
+            background: isListening ? C.danger : C.mint100,
+            color: isListening ? C.white : C.teal700,
+            fontSize: 20,
+            cursor: "pointer",
+            flexShrink: 0,
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+            animation: isListening ? "pulse 1s infinite" : "none",
+          }}
+          title={isListening ? "Listening... click to stop" : "Speak to Sathi"}
+        >
+          {isListening ? "⏹" : "🎙️"}
+        </button>
+
+        <input
+          type="text"
+          value={inputText}
+          disabled={!caseId || loadingReply}
+          onChange={(e) => setInputText(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === "Enter") {
+              e.preventDefault()
+              void handleSend()
+            }
+          }}
+          placeholder={
+            !caseId
+              ? "Starting secure Sathi session..."
+              : isListening
+                ? "Listening... speak now"
+                : "Type incident details here..."
+          }
+          style={{
+            flex: 1,
+            padding: "12px 16px",
+            borderRadius: 24,
+            border: `1.5px solid ${isListening ? C.danger : C.divider}`,
+            outline: "none",
+            fontSize: 14,
+            color: C.textPrimary,
+            background: C.bgCanvas,
+          }}
+        />
+
+        <button
+          type="button"
+          onClick={() => void handleSend()}
+          disabled={!caseId || !inputText.trim() || loadingReply}
+          style={{
+            width: 44,
+            height: 44,
+            borderRadius: "50%",
+            border: "none",
+            background:
+              !caseId || !inputText.trim() || loadingReply ? C.divider : C.teal600,
+            color:
+              !caseId || !inputText.trim() || loadingReply ? C.textSecondary : C.white,
+            fontSize: 18,
+            cursor:
+              !caseId || !inputText.trim() || loadingReply ? "not-allowed" : "pointer",
+            flexShrink: 0,
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+          }}
+        >
+          ➤
+        </button>
+      </div>
+
+      <p style={{ margin: "-4px 16px 8px", fontSize: 10, color: C.textSecondary, background: C.white }}>
+        After voice input, type here to add or correct details with Sathi. Voice recordings are sent to Gemini; API credentials stay on the server.
+      </p>
+
+      <style>{`
+        @keyframes blink { 0%,100%{opacity:1} 50%{opacity:0.3} }
+        @keyframes pulse { 0%,100%{transform:scale(1)} 50%{transform:scale(1.1)} }
+        @keyframes fadeIn { from{opacity:0;transform:translateY(-8px)} to{opacity:1;transform:translateY(0)} }
+      `}</style>
+    </div>
+  )
+}
+
+// ─── Real Review Report Screen ────────────────────────────────────────────────
+
+function ReviewReportScreen({
+  extractedData,
+  setExtractedData,
+  userProfile,
+  onContinueChat,
+  onSubmit,
+  onBack,
+}: {
+  extractedData: ExtractedCaseData
+  setExtractedData: React.Dispatch<React.SetStateAction<ExtractedCaseData>>
+  userProfile: any
+  onContinueChat: () => void
+  onSubmit: () => Promise<void>
+  onBack: () => void
+}) {
+  const [submitting, setSubmitting] = useState(false)
+  const [speaking, setSpeaking] = useState(false)
+
+  const handleSpeakSummary = () => {
+    if (!window.speechSynthesis) return
+
+    if (speaking) {
+      window.speechSynthesis.cancel()
+      setSpeaking(false)
+      return
+    }
+
+    const textToSpeak = `Official incident report. Category: ${extractedData.category}. Amount lost: ${extractedData.amount}. Suspect: ${extractedData.suspectPhone || extractedData.suspectUpi || "Unspecified"}. Statement: ${extractedData.complaintNarrative}`
+    const utterance = new SpeechSynthesisUtterance(textToSpeak)
+    utterance.rate = 1.0
+    utterance.onend = () => setSpeaking(false)
+    utterance.onerror = () => setSpeaking(false)
+
+    setSpeaking(true)
+    window.speechSynthesis.speak(utterance)
+  }
+
+  const handleFormSubmit = async () => {
+    setSubmitting(true)
+    try {
+      await onSubmit()
+    } catch (err: any) {
+      window.alert(`Submission error: ${err?.message || "Failed to submit"}`)
+    } finally {
+      setSubmitting(false)
+    }
+  }
+
+  return (
+    <div
+      style={{
+        flex: 1,
+        display: "flex",
+        flexDirection: "column",
+        background: C.bgCanvas,
+      }}
+    >
+      {/* Header */}
+      <div
+        style={{
+          padding: "16px 20px 14px",
+          background: C.white,
+          borderBottom: `1px solid ${C.divider}`,
+        }}
+      >
+        <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+          <button
+            onClick={onBack}
+            style={{
+              background: "none",
+              border: "none",
+              cursor: "pointer",
+              fontSize: 20,
+              color: C.teal600,
+            }}
+          >
+            ‹
+          </button>
+          <div>
+            <h2
+              style={{
+                margin: 0,
+                fontSize: 18,
+                fontWeight: 700,
+                color: C.textPrimary,
+                fontFamily: "'Poppins', sans-serif",
+              }}
+            >
+              Review & edit your complaint
+            </h2>
+            <p style={{ margin: 0, fontSize: 11, color: C.textSecondary }}>
+              Check every detail. Nothing is submitted until you confirm below.
+            </p>
+          </div>
+        </div>
+      </div>
+
+      <div
+        style={{
+          flex: 1,
+          overflowY: "auto",
+          padding: "16px 20px 24px",
+          display: "flex",
+          flexDirection: "column",
+          gap: 16,
+        }}
+      >
+        <div
+          style={{
+            background: C.mint100,
+            border: `1px solid ${C.mint300}`,
+            borderRadius: 14,
+            padding: "12px 14px",
+          }}
+        >
+          <p
+            style={{
+              margin: "0 0 8px",
+              color: C.teal700,
+              fontSize: 12,
+              lineHeight: 1.45,
+            }}
+          >
+            You can edit the report fields here, or return to Sathi to add
+            information or correct the conversation before filing.
+          </p>
+          <button
+            type="button"
+            onClick={onContinueChat}
+            style={{
+              border: 0,
+              padding: 0,
+              background: "transparent",
+              color: C.teal700,
+              fontSize: 12,
+              fontWeight: 700,
+              cursor: "pointer",
+              textDecoration: "underline",
+            }}
+          >
+            Add or correct details with Sathi
+          </button>
+        </div>
+
+        {/* Listen Audio Card */}
+        <div
+          onClick={handleSpeakSummary}
+          style={{
+            background: C.mint100,
+            borderRadius: 14,
+            padding: "12px 16px",
+            display: "flex",
+            alignItems: "center",
+            gap: 12,
+            cursor: "pointer",
+            border: `1px solid ${C.mint300}`,
+          }}
+        >
+          <div
+            style={{
+              width: 36,
+              height: 36,
+              background: C.teal600,
+              borderRadius: "50%",
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "center",
+              color: C.white,
+              fontSize: 16,
+            }}
+          >
+            {speaking ? "⏹" : "▶"}
+          </div>
+          <div>
+            <p
+              style={{
+                margin: 0,
+                fontSize: 13,
+                fontWeight: 700,
+                color: C.teal700,
+              }}
+            >
+              {speaking
+                ? "Playing Complaint Audio Summary..."
+                : "Listen to Generated Audio Summary"}
+            </p>
+            <p style={{ margin: 0, fontSize: 11, color: C.textSecondary }}>
+              Browser Text-to-Speech playback of this report
+            </p>
+          </div>
+        </div>
+
+        {/* Complaint Details Card */}
+        <div
+          style={{
+            background: C.white,
+            borderRadius: 16,
+            padding: "18px 16px",
+            border: `1px solid ${C.divider}`,
+            boxShadow: "0 2px 10px rgba(0,0,0,0.04)",
+          }}
+        >
+          <p
+            style={{
+              margin: "0 0 14px",
+              fontSize: 11,
+              fontWeight: 700,
+              color: C.teal700,
+              letterSpacing: "0.08em",
+              textTransform: "uppercase",
+            }}
+          >
+            NCRP Standard Intake Fields
+          </p>
+
+          <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
+            <div>
+              <label style={labelStyle} htmlFor="rev-category">
+                Incident Category
+              </label>
+              <input
+                id="rev-category"
+                type="text"
+                value={extractedData.category}
+                onChange={(e) =>
+                  setExtractedData({
+                    ...extractedData,
+                    category: e.target.value,
+                  })
+                }
+                style={inputStyle}
+              />
+            </div>
+
+            <div
+              style={{
+                display: "grid",
+                gridTemplateColumns: "1fr 1fr",
+                gap: 10,
+              }}
+            >
+              <div>
+                <label style={labelStyle} htmlFor="rev-amount">
+                  Amount Defrauded
+                </label>
+                <input
+                  id="rev-amount"
+                  type="text"
+                  value={extractedData.amount}
+                  onChange={(e) =>
+                    setExtractedData({
+                      ...extractedData,
+                      amount: e.target.value,
+                    })
+                  }
+                  style={{ ...inputStyle, fontWeight: 700, color: C.danger }}
+                />
+              </div>
+
+              <div>
+                <label style={labelStyle} htmlFor="rev-date">
+                  Incident Date
+                </label>
+                <input
+                  id="rev-date"
+                  type="text"
+                  value={extractedData.incidentDate}
+                  onChange={(e) =>
+                    setExtractedData({
+                      ...extractedData,
+                      incidentDate: e.target.value,
+                    })
+                  }
+                  style={inputStyle}
+                />
+              </div>
+            </div>
+
+            <div>
+              <label style={labelStyle} htmlFor="rev-phone">
+                Suspect Phone Number
+              </label>
+              <input
+                id="rev-phone"
+                type="text"
+                value={extractedData.suspectPhone}
+                placeholder="e.g. +91 98765 00000"
+                onChange={(e) =>
+                  setExtractedData({
+                    ...extractedData,
+                    suspectPhone: e.target.value,
+                  })
+                }
+                style={inputStyle}
+              />
+            </div>
+
+            <div>
+              <label style={labelStyle} htmlFor="rev-upi">
+                Suspect UPI / VPA / Account
+              </label>
+              <input
+                id="rev-upi"
+                type="text"
+                value={extractedData.suspectUpi}
+                placeholder="e.g. fraudulent.merchant@upi"
+                onChange={(e) =>
+                  setExtractedData({
+                    ...extractedData,
+                    suspectUpi: e.target.value,
+                  })
+                }
+                style={inputStyle}
+              />
+            </div>
+
+            <div>
+              <label style={labelStyle} htmlFor="rev-suspect-details">
+                Suspect Website / Other Details
+              </label>
+              <input
+                id="rev-suspect-details"
+                type="text"
+                value={extractedData.suspectDetails}
+                placeholder="Website, account details, or other identifier"
+                onChange={(e) =>
+                  setExtractedData({
+                    ...extractedData,
+                    suspectDetails: e.target.value,
+                  })
+                }
+                style={inputStyle}
+              />
+            </div>
+
+            <div>
+              <label style={labelStyle} htmlFor="rev-platform">
+                Platform / Banking App
+              </label>
+              <input
+                id="rev-platform"
+                type="text"
+                value={extractedData.platform}
+                placeholder="e.g. PhonePe / Google Pay / SBI Yono"
+                onChange={(e) =>
+                  setExtractedData({
+                    ...extractedData,
+                    platform: e.target.value,
+                  })
+                }
+                style={inputStyle}
+              />
+            </div>
+
+            <div>
+              <label style={labelStyle} htmlFor="rev-summary">
+                Report Summary
+              </label>
+              <textarea
+                id="rev-summary"
+                rows={3}
+                value={extractedData.summary}
+                onChange={(e) =>
+                  setExtractedData({
+                    ...extractedData,
+                    summary: e.target.value,
+                  })
+                }
+                style={{ ...inputStyle, resize: "vertical", lineHeight: 1.4 }}
+              />
+            </div>
+
+            <div>
+              <label style={labelStyle} htmlFor="rev-narrative">
+                Formal Incident Narrative for Cyber Cell
+              </label>
+              <textarea
+                id="rev-narrative"
+                rows={4}
+                value={extractedData.complaintNarrative}
+                onChange={(e) =>
+                  setExtractedData({
+                    ...extractedData,
+                    complaintNarrative: e.target.value,
+                  })
+                }
+                style={{ ...inputStyle, resize: "vertical", lineHeight: 1.4 }}
+              />
+            </div>
+
+            <div>
+              <label style={labelStyle} htmlFor="rev-action-requested">
+                Requested Action
+              </label>
+              <textarea
+                id="rev-action-requested"
+                rows={2}
+                value={extractedData.actionRequested}
+                onChange={(e) =>
+                  setExtractedData({
+                    ...extractedData,
+                    actionRequested: e.target.value,
+                  })
+                }
+                style={{ ...inputStyle, resize: "vertical", lineHeight: 1.4 }}
+              />
+            </div>
+          </div>
+        </div>
+
+        {/* Complainant Profile Box */}
+        <div
+          style={{
             background: C.white,
             borderRadius: 16,
             padding: "14px 16px",
-            cursor: "pointer",
-            boxShadow: `0 4px 12px rgba(11,46,46,0.07)`,
-            transition: "transform 0.15s",
+            border: `1px solid ${C.divider}`,
           }}
-            onMouseDown={e => (e.currentTarget.style.transform = "scale(0.97)")}
-            onMouseUp={e => (e.currentTarget.style.transform = "scale(1)")}
+        >
+          <p
+            style={{
+              margin: "0 0 8px",
+              fontSize: 11,
+              fontWeight: 700,
+              color: C.textSecondary,
+              letterSpacing: "0.08em",
+              textTransform: "uppercase",
+            }}
           >
-            <div style={{ fontSize: 28, marginBottom: 6 }}>{s.icon}</div>
-            <p style={{ margin: "0 0 2px", fontSize: 13, fontWeight: 600, color: C.textPrimary }}>{s.label}</p>
-            <p style={{ margin: 0, fontSize: 11, color: C.textSecondary }}>{s.sub}</p>
-          </div>
-        ))}
+            Complainant Credentials
+          </p>
+          <p
+            style={{
+              margin: "0 0 2px",
+              fontSize: 13,
+              fontWeight: 700,
+              color: C.textPrimary,
+            }}
+          >
+            {userProfile.displayName || "Complainant"}
+          </p>
+          <p style={{ margin: 0, fontSize: 12, color: C.textSecondary }}>
+            {userProfile.phone || userProfile.email} •{" "}
+            {userProfile.stateDistrict}
+          </p>
+        </div>
+
+        {/* Submit Button */}
+        <div style={{ marginTop: 8 }}>
+          <PrimaryButton
+            label={
+              submitting
+                ? "Saving report..."
+                : "Save reviewed report"
+            }
+            disabled={submitting}
+            onClick={handleFormSubmit}
+          />
+        </div>
       </div>
     </div>
-  );
+  )
 }
 
-// ─── Listening ────────────────────────────────────────────────────────────────
+// ─── Real Success Screen ──────────────────────────────────────────────────────
 
-function ListeningScreen({ onDone, onBack }: { onDone: () => void; onBack: () => void }) {
-  const [words, setWords] = useState<string[]>([]);
-  const TRANSCRIPT = ["Yesterday", "I", "received", "a", "call", "from", "+91-98765-00021", "claiming", "to", "be", "from", "HDFC", "Bank...", "They", "asked", "for", "my", "UPI", "PIN", "and", "transferred", "₹15,000."];
-
-  useEffect(() => {
-    const timers = TRANSCRIPT.map((w, i) =>
-      setTimeout(() => {
-        setWords(prev => [...prev, w]);
-      }, i * 350 + 600)
-    );
-
-    return () => {
-      timers.forEach(clearTimeout);
-    };
-  }, []);
-
+function SuccessScreen({
+  caseRecord,
+  onTrack,
+  onHome,
+}: {
+  caseRecord: CaseRecord | null
+  onTrack: () => void
+  onHome: () => void
+}) {
   return (
-    <div style={{ flex: 1, background: C.teal900, display: "flex", flexDirection: "column", alignItems: "center", position: "relative" }}>
-      {/* Header */}
-      <div style={{ width: "100%", padding: "16px 20px", display: "flex", alignItems: "center", gap: 12 }}>
-        <div style={{ display: "flex", alignItems: "center", gap: 6, background: "rgba(255,255,255,0.1)", borderRadius: 20, padding: "6px 14px" }}>
-          <div style={{ width: 8, height: 8, borderRadius: "50%", background: C.danger, animation: "blink 1s infinite" }} />
-          <span style={{ fontSize: 11, fontWeight: 600, color: C.white, letterSpacing: "0.08em" }}>LISTENING LIVE</span>
-        </div>
-        <style>{`@keyframes blink { 0%,100%{opacity:1} 50%{opacity:0.3} }`}</style>
-      </div>
-      <p style={{ color: "rgba(255,255,255,0.5)", fontSize: 13, margin: "0 0 32px" }}>Speak clearly into your microphone.</p>
-
-      {/* Sonar orb */}
-      <div style={{ position: "relative", marginBottom: 32 }}>
-        {[0, 1, 2].map(i => (
-          <div key={i} style={{
-            position: "absolute",
-            borderRadius: "50%",
-            border: `2px solid ${C.mint300}`,
-            opacity: 0,
-            animation: `sonar 2.4s ${i * 0.8}s ease-out infinite`,
-            inset: -(40 + i * 20),
-          }} />
-        ))}
-        <style>{`@keyframes sonar { 0%{opacity:0.6;transform:scale(0.8)} 100%{opacity:0;transform:scale(1.6)} }`}</style>
-        <div style={{
-          width: 100, height: 100, borderRadius: "50%",
-          background: `linear-gradient(135deg, ${C.teal500}, ${C.mint300})`,
-          display: "flex", alignItems: "center", justifyContent: "center",
-          fontSize: 40, boxShadow: `0 0 48px ${C.mint300}50`,
-        }}>🎙️</div>
+    <div
+      style={{
+        flex: 1,
+        overflowY: "auto",
+        padding: "28px 20px 24px",
+        display: "flex",
+        flexDirection: "column",
+        alignItems: "center",
+        background: C.bgCanvas,
+      }}
+    >
+      <div
+        style={{
+          width: 72,
+          height: 72,
+          borderRadius: "50%",
+          background: C.successBg,
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "center",
+          fontSize: 36,
+          marginBottom: 16,
+        }}
+      >
+        ✓
       </div>
 
-      {/* Live caption */}
-      <div style={{
-        margin: "0 20px",
-        background: "rgba(255,255,255,0.08)",
-        backdropFilter: "blur(12px)",
-        borderRadius: 16,
-        padding: "16px 18px",
-        minHeight: 80,
-        width: "calc(100% - 40px)",
-      }}>
-        <p style={{ color: "rgba(255,255,255,0.4)", fontSize: 10, letterSpacing: "0.1em", textTransform: "uppercase", margin: "0 0 8px" }}>Live Transcript</p>
-        <p style={{ color: C.white, fontSize: 14, lineHeight: 1.6, margin: 0 }}>
-          "{words.join(" ")}{words.length > 0 && words.length < TRANSCRIPT.length && <span style={{ opacity: 0.4, animation: "blink 1s infinite" }}>|</span> }"
+      <h1
+        style={{
+          fontFamily: "'Poppins', sans-serif",
+          fontSize: 22,
+          fontWeight: 700,
+          color: C.textPrimary,
+          margin: "0 0 6px",
+          textAlign: "center",
+        }}
+      >
+        Report saved
+      </h1>
+      <p
+        style={{
+          fontSize: 13,
+          color: C.textSecondary,
+          textAlign: "center",
+          margin: "0 0 24px",
+          lineHeight: 1.5,
+        }}
+      >
+        Your reviewed report is saved to your Cyber Sathi account. It has not
+        been submitted to a government portal.
+      </p>
+
+      <div
+        style={{
+          width: "100%",
+          background: C.white,
+          border: `1px solid ${C.teal600}`,
+          borderRadius: 16,
+          padding: "16px 18px",
+          marginBottom: 20,
+          boxSizing: "border-box",
+        }}
+      >
+        <p
+          style={{
+            margin: "0 0 4px",
+            fontSize: 10,
+            fontWeight: 700,
+            color: C.textSecondary,
+            letterSpacing: "0.08em",
+          }}
+        >
+          CYBER SATHI CASE ID
+        </p>
+        <p
+          style={{
+            margin: 0,
+            overflowWrap: "anywhere",
+            fontFamily: "monospace",
+            fontSize: 14,
+            fontWeight: 700,
+            color: C.teal700,
+          }}
+        >
+          {caseRecord?.id || "Unavailable"}
         </p>
       </div>
 
-      {/* Stop button */}
-      <div style={{ marginTop: "auto", marginBottom: 24, display: "flex", gap: 12 }}>
-        <button onClick={onBack} style={{ padding: "12px 20px", borderRadius: 28, border: `1px solid rgba(255,255,255,0.2)`, background: "transparent", color: C.white, fontSize: 13, cursor: "pointer" }}>
-          ⌨️ Type instead
-        </button>
-        <button onClick={onDone} style={{
-          padding: "12px 28px", borderRadius: 28, background: C.danger,
-          border: "none", color: C.white, fontSize: 14, fontWeight: 700, cursor: "pointer",
-        }}>
-          ■ Stop Listening
-        </button>
+      {/* Case Summary Snapshot */}
+      <div
+        style={{
+          width: "100%",
+          background: C.white,
+          borderRadius: 16,
+          padding: "16px",
+          marginBottom: 24,
+          border: `1px solid ${C.divider}`,
+          boxSizing: "border-box",
+        }}
+      >
+        <p
+          style={{
+            margin: "0 0 10px",
+            fontSize: 12,
+            fontWeight: 700,
+            color: C.teal700,
+            textTransform: "uppercase",
+          }}
+        >
+          Saved Report Details
+        </p>
+        <div
+          style={{
+            display: "flex",
+            flexDirection: "column",
+            gap: 8,
+            fontSize: 13,
+          }}
+        >
+          <div style={{ display: "flex", justifyContent: "space-between" }}>
+            <span style={{ color: C.textSecondary }}>Incident Category:</span>
+            <strong>{caseRecord?.category || "Not classified"}</strong>
+          </div>
+          <div style={{ display: "flex", justifyContent: "space-between" }}>
+            <span style={{ color: C.textSecondary }}>Amount Involved:</span>
+            <strong style={{ color: C.danger }}>
+              {caseRecord?.amount || "Not provided"}
+            </strong>
+          </div>
+          {caseRecord?.suspectPhone && (
+            <div style={{ display: "flex", justifyContent: "space-between" }}>
+              <span style={{ color: C.textSecondary }}>Suspect Phone:</span>
+              <strong>{caseRecord.suspectPhone}</strong>
+            </div>
+          )}
+          <div style={{ display: "flex", justifyContent: "space-between" }}>
+            <span style={{ color: C.textSecondary }}>Filing Destination:</span>
+            <strong style={{ fontSize: 11, textAlign: "right" }}>
+              Not submitted
+            </strong>
+          </div>
+        </div>
+      </div>
+
+      {/* Next Actions */}
+      <div
+        style={{
+          width: "100%",
+          display: "flex",
+          flexDirection: "column",
+          gap: 10,
+          boxSizing: "border-box",
+        }}
+      >
+        <PrimaryButton label="View saved case" onClick={onTrack} />
+        <a
+          href="https://cybercrime.gov.in/"
+          target="_blank"
+          rel="noopener noreferrer"
+          style={{
+            display: "block",
+            padding: "12px 16px",
+            borderRadius: 24,
+            background: C.teal600,
+            color: C.white,
+            textAlign: "center",
+            textDecoration: "none",
+            fontSize: 13,
+            fontWeight: 700,
+          }}
+        >
+          Open official cybercrime portal
+        </a>
+        <SecondaryButton label="Return to Home Dashboard" onClick={onHome} />
       </div>
     </div>
-  );
+  )
 }
 
-// ─── Processing ───────────────────────────────────────────────────────────────
+// ─── Real "My Cases" Screen ───────────────────────────────────────────────────
 
-function ProcessingScreen({ onDone }: { onDone: () => void }) {
-  const [step, setStep] = useState(-1);
-  const [showSheet, setShowSheet] = useState(false);
-
-  const steps = [
-    "Transcribed voice recording",
-    "Checking suspicious messages",
-    "Checking recent caller identity...",
-  ];
-
-  useEffect(() => {
-    [0, 1, 2].forEach(i => setTimeout(() => setStep(i), 1200 + i * 1400));
-    setTimeout(() => setShowSheet(true), 1200 + 2 * 1400 + 600);
-  }, []);
-
+function MyCasesScreen({
+  cases,
+  loading,
+  error,
+  onRetry,
+  onSelectCase,
+  onNewReport,
+}: {
+  cases: CaseRecord[]
+  loading: boolean
+  error: string
+  onRetry: () => void
+  onSelectCase: (c: CaseRecord) => void
+  onNewReport: () => void
+}) {
   return (
-    <div style={{ flex: 1, background: C.teal900, display: "flex", flexDirection: "column", alignItems: "center", padding: "32px 20px", position: "relative" }}>
-      {/* Rotating orb */}
-      <div style={{ position: "relative", marginBottom: 28 }}>
-        <div style={{
-          width: 96, height: 96, borderRadius: "50%",
-          background: `conic-gradient(${C.mint300}, ${C.teal500}, ${C.mint300})`,
-          animation: "spinOrb 4s linear infinite",
-          display: "flex", alignItems: "center", justifyContent: "center",
-        }}>
-          <div style={{ width: 68, height: 68, borderRadius: "50%", background: C.teal900, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 28 }}>⚙️</div>
+    <div
+      style={{
+        flex: 1,
+        overflowY: "auto",
+        background: C.bgCanvas,
+        padding: "18px 20px 24px",
+      }}
+    >
+      <div
+        style={{
+          display: "flex",
+          justifyContent: "space-between",
+          alignItems: "center",
+          marginBottom: 18,
+        }}
+      >
+        <h1
+          style={{
+            fontFamily: "'Poppins', sans-serif",
+            fontSize: 22,
+            fontWeight: 700,
+            color: C.textPrimary,
+            margin: 0,
+          }}
+        >
+          My Cases
+        </h1>
+        <button
+          onClick={onNewReport}
+          style={{
+            background: C.teal600,
+            border: "none",
+            borderRadius: 20,
+            padding: "8px 14px",
+            color: C.white,
+            fontSize: 12,
+            fontWeight: 700,
+            cursor: "pointer",
+          }}
+        >
+          + New Report
+        </button>
+      </div>
+
+      {loading ? (
+        <p style={{ marginTop: 24, textAlign: "center", color: C.textSecondary }}>
+          Loading saved reports...
+        </p>
+      ) : error ? (
+        <div
+          role="alert"
+          style={{
+            marginTop: 20,
+            padding: 16,
+            background: C.white,
+            border: `1px solid ${C.danger}`,
+            borderRadius: 16,
+            color: C.textPrimary,
+          }}
+        >
+          <p style={{ margin: "0 0 12px", fontSize: 13 }}>{error}</p>
+          <SecondaryButton label="Retry loading reports" onClick={onRetry} />
         </div>
-        <style>{`@keyframes spinOrb { from{transform:rotate(0deg)} to{transform:rotate(360deg)} }`}</style>
-      </div>
+      ) : cases.length === 0 ? (
+        <div
+          style={{
+            background: C.white,
+            borderRadius: 20,
+            padding: "36px 20px",
+            textAlign: "center",
+            border: `1px solid ${C.divider}`,
+            marginTop: 20,
+          }}
+        >
+          <div style={{ fontSize: 48, marginBottom: 12 }}>📂</div>
+          <h3
+            style={{
+              margin: "0 0 6px",
+              fontSize: 16,
+              fontWeight: 700,
+              color: C.textPrimary,
+            }}
+          >
+            No Saved Reports Yet
+          </h3>
+          <p
+            style={{
+              margin: "0 0 20px",
+              fontSize: 13,
+              color: C.textSecondary,
+              lineHeight: 1.5,
+            }}
+          >
+            Reports saved to your Cyber Sathi account will appear here. Official
+            portal acknowledgment numbers appear only after you submit there.
+          </p>
+          <PrimaryButton label="Report an Incident Now" onClick={onNewReport} />
+        </div>
+      ) : (
+        <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+          {cases.map((c) => (
+            <div
+              key={c.id}
+              onClick={() => onSelectCase(c)}
+              style={{
+                background: C.white,
+                borderRadius: 16,
+                padding: "16px",
+                cursor: "pointer",
+                boxShadow: "0 2px 8px rgba(11,46,46,0.06)",
+                border: `1px solid ${C.divider}`,
+              }}
+            >
+              <div
+                style={{
+                  display: "flex",
+                  justifyContent: "space-between",
+                  alignItems: "flex-start",
+                  marginBottom: 6,
+                }}
+              >
+                <span
+                  style={{
+                    fontSize: 11,
+                    fontWeight: 700,
+                    color: C.teal700,
+                    fontFamily: "monospace",
+                  }}
+                >
+                  {c.trackingNumber || `Case ID: ${c.id}`}
+                </span>
+                <span
+                  style={{
+                    background: c.status === "FILED" ? C.mint100 : "#FDECC8",
+                    color: c.status === "FILED" ? C.teal700 : "#9A6100",
+                    fontSize: 10,
+                    fontWeight: 700,
+                    padding: "3px 8px",
+                    borderRadius: 8,
+                  }}
+                >
+                  {c.status}
+                </span>
+              </div>
 
-      <h2 style={{ fontFamily: "'Poppins',sans-serif", color: C.white, fontSize: 20, fontWeight: 700, margin: "0 0 8px", textAlign: "center" }}>Understanding what happened</h2>
-      <p style={{ color: "rgba(255,255,255,0.5)", fontSize: 13, margin: "0 0 36px", textAlign: "center" }}>Sathi is extracting fraud indicators from your statement.</p>
-
-      <div style={{ width: "100%", display: "flex", flexDirection: "column", gap: 16 }}>
-        {steps.map((s, i) => (
-          <ChecklistItem key={i} label={s} state={i < step ? "done" : i === step ? "active" : "pending"} />
-        ))}
-      </div>
-
-      {/* Disambiguation bottom sheet */}
-      {showSheet && (
-        <DisambiguationSheet onSelect={() => { setShowSheet(false); setTimeout(onDone, 800); }} />
+              <p
+                style={{
+                  margin: "0 0 4px",
+                  fontSize: 15,
+                  fontWeight: 700,
+                  color: C.textPrimary,
+                }}
+              >
+                {c.category}
+              </p>
+              <p
+                style={{
+                  margin: "0 0 8px",
+                  fontSize: 12,
+                  color: C.textSecondary,
+                }}
+              >
+                Loss: <strong style={{ color: C.danger }}>{c.amount}</strong> •{" "}
+                {c.incidentDate}
+              </p>
+              <p
+                style={{
+                  margin: 0,
+                  fontSize: 12,
+                  color: C.textSecondary,
+                  overflow: "hidden",
+                  textOverflow: "ellipsis",
+                  whiteSpace: "nowrap",
+                }}
+              >
+                {c.complaintNarrative}
+              </p>
+            </div>
+          ))}
+        </div>
       )}
     </div>
-  );
+  )
 }
 
-function ChecklistItem({ label, state }: { label: string; state: "done" | "active" | "pending" }) {
-  return (
-    <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
-      <div style={{
-        width: 28, height: 28, borderRadius: "50%", flexShrink: 0,
-        background: state === "done" ? C.teal600 : "transparent",
-        border: `2px ${state === "pending" ? "dashed" : "solid"} ${state === "done" ? C.teal600 : state === "active" ? C.mint300 : "rgba(255,255,255,0.2)"}`,
-        display: "flex", alignItems: "center", justifyContent: "center",
-        fontSize: 13,
-        transition: "all 0.4s ease",
-      }}>
-        {state === "done" ? "✓" : state === "active" ? <div style={{ width: 8, height: 8, borderRadius: "50%", background: C.mint300, animation: "blink 1s infinite" }} /> : ""}
+// ─── Real Case Status Screen ──────────────────────────────────────────────────
+
+function CaseStatusScreen({
+  caseRecord,
+  onBack,
+}: {
+  caseRecord: CaseRecord | null
+  onBack: () => void
+}) {
+  if (!caseRecord) {
+    return (
+      <div style={{ flex: 1, padding: 20 }}>
+        <button onClick={onBack}>‹ Back</button>
+        <p>Case not found.</p>
       </div>
-      <span style={{ color: state === "pending" ? "rgba(255,255,255,0.3)" : C.white, fontSize: 14, transition: "color 0.3s" }}>{label}</span>
-    </div>
-  );
-}
-
-function DisambiguationSheet({ onSelect }: { onSelect: () => void }) {
-  const numbers = [
-    { num: "+91 98765 00021", name: "Unknown", scam: true, count: 28 },
-    { num: "+91 22 6648 7777", name: "HDFC Bank", scam: false, count: 0 },
-  ];
+    )
+  }
 
   return (
-    <div style={{ position: "absolute", inset: 0, background: "rgba(0,0,0,0.6)", display: "flex", alignItems: "flex-end", animation: "fadeIn 0.3s ease" }}>
-      <div style={{ background: C.white, borderRadius: "24px 24px 0 0", width: "100%", padding: "24px 20px" }}>
-        <div style={{ width: 40, height: 4, background: "#ddd", borderRadius: 2, margin: "0 auto 20px" }} />
-        <h3 style={{ margin: "0 0 4px", fontSize: 16, fontWeight: 700, color: C.textPrimary }}>Which number called you?</h3>
-        <p style={{ margin: "0 0 20px", fontSize: 13, color: C.textSecondary }}>Sathi detected these numbers from your statement</p>
-        {numbers.map((n, i) => (
-          <div key={i} onClick={onSelect} style={{
-            background: C.bgCanvas,
-            borderRadius: 14,
-            padding: "14px 16px",
-            marginBottom: 10,
-            cursor: "pointer",
+    <div
+      style={{
+        flex: 1,
+        display: "flex",
+        flexDirection: "column",
+        background: C.bgCanvas,
+      }}
+    >
+      <div
+        style={{
+          padding: "16px 20px 14px",
+          background: C.white,
+          borderBottom: `1px solid ${C.divider}`,
+        }}
+      >
+        <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+          <button
+            onClick={onBack}
+            style={{
+              background: "none",
+              border: "none",
+              cursor: "pointer",
+              fontSize: 20,
+              color: C.teal600,
+            }}
+          >
+            ‹
+          </button>
+          <div>
+            <h2
+              style={{
+                margin: 0,
+                fontSize: 18,
+                fontWeight: 700,
+                color: C.textPrimary,
+                fontFamily: "'Poppins', sans-serif",
+              }}
+            >
+              Case Tracking
+            </h2>
+            <p style={{ margin: 0, fontSize: 11, color: C.textSecondary }}>
+              {caseRecord.trackingNumber
+                ? `Official acknowledgment: ${caseRecord.trackingNumber}`
+                : `Cyber Sathi case ID: ${caseRecord.id}`}
+            </p>
+          </div>
+        </div>
+      </div>
+
+      <div style={{ flex: 1, overflowY: "auto", padding: "16px 20px 24px" }}>
+        {/* Summary Card */}
+        <div
+          style={{
+            background: C.white,
+            borderRadius: 16,
+            padding: "16px",
+            marginBottom: 20,
             border: `1px solid ${C.divider}`,
+          }}
+        >
+          <div
+            style={{
+              display: "flex",
+              justifyContent: "space-between",
+              alignItems: "flex-start",
+              marginBottom: 8,
+            }}
+          >
+            <span
+              style={{
+                fontSize: 11,
+                fontWeight: 700,
+                color: C.teal700,
+                fontFamily: "monospace",
+              }}
+            >
+              {caseRecord.trackingNumber || `Case ID: ${caseRecord.id}`}
+            </span>
+            <span
+              style={{
+                background: C.mint100,
+                color: C.teal700,
+                fontSize: 10,
+                fontWeight: 700,
+                padding: "3px 8px",
+                borderRadius: 8,
+              }}
+            >
+              {caseRecord.status}
+            </span>
+          </div>
+          <h3
+            style={{
+              margin: "0 0 4px",
+              fontSize: 16,
+              fontWeight: 700,
+              color: C.textPrimary,
+            }}
+          >
+            {caseRecord.category}
+          </h3>
+          <p
+            style={{ margin: "0 0 10px", fontSize: 13, color: C.textSecondary }}
+          >
+            Reported Amount:{" "}
+            <strong style={{ color: C.danger }}>
+              {caseRecord.amount || "Not provided"}
+            </strong>
+          </p>
+          <div
+            style={{
+              background: C.bgCanvas,
+              borderRadius: 10,
+              padding: "10px 12px",
+            }}
+          >
+            <p
+              style={{
+                margin: "0 0 4px",
+                fontSize: 10,
+                fontWeight: 700,
+                color: C.textSecondary,
+                textTransform: "uppercase",
+              }}
+            >
+              Report Narrative
+            </p>
+            <p
+              style={{
+                margin: 0,
+                fontSize: 12,
+                color: C.textPrimary,
+                lineHeight: 1.4,
+              }}
+            >
+              {caseRecord.complaintNarrative}
+            </p>
+          </div>
+        </div>
+
+        <div
+          style={{
+            padding: 14,
+            background: C.mint100,
+            border: `1px solid ${C.mint300}`,
+            borderRadius: 12,
+          }}
+        >
+          <strong style={{ color: C.teal700, fontSize: 12 }}>
+            Cyber Sathi record status
+          </strong>
+          <p
+            style={{
+              margin: "6px 0 0",
+              color: C.textPrimary,
+              fontSize: 12,
+              lineHeight: 1.5,
+            }}
+          >
+            This status reflects the saved record in Cyber Sathi only. It does
+            not show government portal processing or bank action. An official
+            acknowledgment is shown only when one has been recorded.
+          </p>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+// ─── Real Defend Community Feed Screen ────────────────────────────────────────
+
+function DefendScreen({
+  onStartReport,
+}: {
+  onStartReport: () => void
+}) {
+  const officialResources = [
+    {
+      name: "CERT-In advisories",
+      description:
+        "Open the Indian Computer Emergency Response Team website for current security advisories.",
+      url: "https://www.cert-in.org.in/",
+    },
+    {
+      name: "National Cyber Crime Reporting Portal",
+      description:
+        "Use the Government of India's official portal to report cybercrime and financial fraud.",
+      url: "https://cybercrime.gov.in/",
+    },
+  ]
+
+  return (
+    <div
+      style={{
+        flex: 1,
+        overflowY: "auto",
+        background: C.bgCanvas,
+        padding: "18px 20px 24px",
+      }}
+    >
+      <h1
+        style={{
+          fontFamily: "'Poppins', sans-serif",
+          fontSize: 22,
+          fontWeight: 700,
+          color: C.textPrimary,
+          margin: "0 0 4px",
+        }}
+      >
+        Defend & Protect
+      </h1>
+      <p style={{ margin: "0 0 16px", fontSize: 13, color: C.textSecondary }}>
+        Official resources for current cyber security guidance and reporting.
+      </p>
+
+      <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+        <div
+          style={{
+            background: C.warning,
+            borderRadius: 12,
+            padding: 12,
+            color: "#7a4d00",
+            fontSize: 12,
+            lineHeight: 1.5,
+          }}
+        >
+          Live advisory feeds are not connected in this app. Open an official
+          source below to see current information; Cyber Sathi does not display
+          unverified or sample alerts.
+        </div>
+        {officialResources.map((resource) => (
+          <div
+            key={resource.url}
+            style={{
+              background: C.white,
+              borderRadius: 16,
+              padding: "16px",
+              border: `1px solid ${C.divider}`,
+              boxShadow: "0 2px 8px rgba(0,0,0,0.04)",
+            }}
+          >
+            <h2
+              style={{
+                margin: "0 0 6px",
+                color: C.textPrimary,
+                fontSize: 15,
+              }}
+            >
+              {resource.name}
+            </h2>
+            <p
+              style={{
+                margin: "0 0 12px",
+                fontSize: 13,
+                color: C.textPrimary,
+                lineHeight: 1.4,
+              }}
+            >
+              {resource.description}
+            </p>
+            <a
+              href={resource.url}
+              target="_blank"
+              rel="noopener noreferrer"
+              style={{
+                color: C.teal700,
+                fontSize: 12,
+                fontWeight: 700,
+                textDecoration: "underline",
+              }}
+            >
+              Visit official source ↗
+            </a>
+          </div>
+        ))}
+
+        <div style={{ marginTop: 12 }}>
+          <SecondaryButton
+            label="Got targeted by a scam? Report with Sathi"
+            onClick={onStartReport}
+          />
+        </div>
+      </div>
+    </div>
+  )
+}
+
+// ─── Real Profile Screen ──────────────────────────────────────────────────────
+
+function ProfileScreen({
+  userProfile,
+  setUserProfile,
+  language,
+  setLanguage,
+  onLogout,
+  userId,
+}: {
+  userProfile: any
+  setUserProfile: any
+  language: "en" | "hi" | "bn"
+  setLanguage: (l: "en" | "hi" | "bn") => void
+  onLogout: () => Promise<void>
+  userId?: string
+}) {
+  const [editing, setEditing] = useState(false)
+  const [name, setName] = useState(userProfile.displayName || "")
+  const [phone, setPhone] = useState(
+    (userProfile.phone || "").replace("+91 ", ""),
+  )
+  const [stateDistrict, setStateDistrict] = useState(
+    userProfile.stateDistrict || "",
+  )
+  const [lang, setLang] = useState<"en" | "hi" | "bn">(language)
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState("")
+  const [notice, setNotice] = useState("")
+
+  useEffect(() => {
+    if (!editing) return
+    setName(userProfile.displayName || "")
+    setPhone((userProfile.phone || "").replace("+91 ", ""))
+    setStateDistrict(userProfile.stateDistrict || "")
+    setLang(language)
+    setError("")
+    setNotice("")
+  }, [editing, userProfile, language])
+
+  const startEditing = () => {
+    setName(userProfile.displayName || "")
+    setPhone((userProfile.phone || "").replace("+91 ", ""))
+    setStateDistrict(userProfile.stateDistrict || "")
+    setLang(language)
+    setError("")
+    setNotice("")
+    setEditing(true)
+  }
+
+  const cancelEditing = () => {
+    setEditing(false)
+    setError("")
+    setNotice("")
+  }
+
+  const handleSave = async () => {
+    if (name.trim().length < 2) {
+      setError("Please enter your legal name for the report.")
+      return
+    }
+    setBusy(true)
+    setError("")
+    setNotice("")
+    try {
+      const cleanPhone = phone.trim()
+        ? phone.startsWith("+91")
+          ? phone.trim()
+          : `+91 ${phone.replace(/\D/g, "")}`
+        : ""
+      const updated = {
+        displayName: name.trim(),
+        phone: cleanPhone,
+        email: userProfile.email,
+        stateDistrict: stateDistrict.trim(),
+        language: lang,
+      }
+      setUserProfile(updated)
+      setLanguage(lang)
+
+      if (userId) {
+        await updateProfile(userId, { full_name: name.trim() })
+      }
+      await supabase.auth.updateUser({
+        data: {
+          full_name: name.trim(),
+          displayName: name.trim(),
+          phone_e164: cleanPhone,
+          state_district: stateDistrict.trim(),
+          preferred_language: lang,
+        },
+      })
+
+      setNotice("Profile updated successfully.")
+      setEditing(false)
+    } catch (err: any) {
+      setError(err?.message || "Could not update profile.")
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <div
+      style={{
+        flex: 1,
+        overflowY: "auto",
+        background: C.bgCanvas,
+        padding: "20px",
+      }}
+    >
+      {/* Avatar Header */}
+      <div style={{ textAlign: "center", marginBottom: 20 }}>
+        <div
+          style={{
+            width: 68,
+            height: 68,
+            borderRadius: "50%",
+            background: `linear-gradient(135deg, ${C.teal600}, ${C.teal500})`,
+            margin: "0 auto 10px",
             display: "flex",
             alignItems: "center",
-            justifyContent: "space-between",
-          }}>
-            <div>
-              <p style={{ margin: "0 0 2px", fontWeight: 600, color: C.textPrimary, fontSize: 14 }}>{n.num}</p>
-              <p style={{ margin: 0, fontSize: 12, color: C.textSecondary }}>{n.name}</p>
-            </div>
-            {n.scam && (
-              <span style={{ background: "#FEE2E2", color: C.danger, fontSize: 10, fontWeight: 700, padding: "3px 8px", borderRadius: 8, letterSpacing: "0.03em" }}>
-                Reported {n.count}+ times
-              </span>
-            )}
-          </div>
-        ))}
-      </div>
-      <style>{`@keyframes fadeIn { from{opacity:0} to{opacity:1} }`}</style>
-    </div>
-  );
-}
-
-// ─── Scam Analysis ────────────────────────────────────────────────────────────
-
-function ScamAnalysisScreen({ onNext, onBack }: { onNext: () => void; onBack: () => void }) {
-  const [revealed, setRevealed] = useState(false);
-
-  useEffect(() => {
-    setTimeout(() => setRevealed(true), 400);
-  }, []);
-
-  return (
-    <ScreenShell title="Scam Analysis" subtitle="Sathi has categorised your incident" onBack={onBack}>
-      <div style={{ flex: 1, padding: "0 0 20px", display: "flex", flexDirection: "column", gap: 16 }}>
-        {/* Result card */}
-        <div style={{
-          border: `2px solid ${C.warningIcon}`,
-          background: C.warning,
-          borderRadius: 20,
-          padding: "24px 20px",
-          textAlign: "center",
-          transition: "opacity 0.4s, transform 0.4s",
-          opacity: revealed ? 1 : 0,
-          transform: revealed ? "scale(1)" : "scale(0.9)",
-        }}>
-          <div style={{ width: 56, height: 56, background: C.warningIcon, borderRadius: "50%", margin: "0 auto 12px", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 24 }}>⚠️</div>
-          <p style={{ margin: "0 0 4px", fontSize: 10, fontWeight: 700, letterSpacing: "0.12em", textTransform: "uppercase", color: "#7a4d00" }}>DETECTED CATEGORY</p>
-          <h2 style={{ fontFamily: "'Poppins',sans-serif", margin: 0, fontSize: 22, fontWeight: 700, color: C.textPrimary }}>UPI Payment Fraud</h2>
-        </div>
-
-        {/* Filing information */}
-        <div style={{ background: C.white, borderRadius: 20, padding: "20px", boxShadow: `0 4px 16px rgba(11,46,46,0.08)` }}>
-          <h3 style={{ margin: "0 0 10px", fontSize: 16, fontWeight: 700, color: C.textPrimary }}>Filing Information</h3>
-          <p style={{ margin: "0 0 14px", fontSize: 13, color: C.textSecondary, lineHeight: 1.6 }}>
-            This will be filed with the <strong>National Cyber Crime Reporting Portal (NCRP)</strong> — Financial Fraud module, which has a dedicated fast-track for UPI fraud within the golden hour.
-          </p>
-          <div style={{ display: "flex", alignItems: "center", gap: 6, cursor: "pointer" }}>
-            <span style={{ fontSize: 13 }}>❓</span>
-            <span style={{ fontSize: 13, color: C.teal600, fontWeight: 600 }}>Not correct? Change category</span>
-          </div>
-        </div>
-      </div>
-      <PrimaryButton label="Continue →" onClick={onNext} />
-    </ScreenShell>
-  );
-}
-
-// ─── Review Details ───────────────────────────────────────────────────────────
-
-function ReviewDetailsScreen({ onNext, onBack }: { onNext: () => void; onBack: () => void }) {
-  const fields = [
-    { label: "SCAMMER PHONE NUMBER", value: "+91 98765 00021" },
-    { label: "AMOUNT LOST (₹)", value: "₹15,000" },
-    { label: "DATE & TIME", value: "Aug 30, 2026 • 2:43 PM" },
-    { label: "BANK / APP USED", value: "PhonePe (HDFC Bank)" },
-    { label: "BRIEF DESCRIPTION", value: "Caller claimed to be from HDFC Bank, requested UPI PIN for \"account verification\", transferred funds." },
-  ];
-
-  return (
-    <ScreenShell title="Review Details" subtitle="Ensure the information is completely correct" onBack={onBack}>
-      {/* Audio summary */}
-      <div style={{ background: C.mint100, borderRadius: 14, padding: "12px 16px", display: "flex", alignItems: "center", gap: 10, marginBottom: 20 }}>
-        <div style={{ width: 36, height: 36, background: C.teal600, borderRadius: "50%", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 16 }}>▶</div>
-        <div>
-          <p style={{ margin: 0, fontSize: 13, fontWeight: 600, color: C.teal600 }}>Listen to Summary</p>
-          <p style={{ margin: 0, fontSize: 11, color: C.textSecondary }}>Hear the auto-generated voice report</p>
-        </div>
-      </div>
-
-      <div style={{ display: "flex", flexDirection: "column", gap: 0, background: C.white, borderRadius: 16, overflow: "hidden", boxShadow: `0 4px 16px rgba(11,46,46,0.08)`, marginBottom: 20 }}>
-        {fields.map((f, i) => (
-          <div key={i} style={{ padding: "14px 16px", borderBottom: i < fields.length - 1 ? `1px solid ${C.divider}` : "none", display: "flex", justifyContent: "space-between", alignItems: "flex-start" }}>
-            <div style={{ flex: 1 }}>
-              <p style={{ margin: "0 0 2px", fontSize: 10, fontWeight: 700, color: C.textSecondary, letterSpacing: "0.08em", textTransform: "uppercase" }}>{f.label}</p>
-              <p style={{ margin: 0, fontSize: 13, color: C.textPrimary, lineHeight: 1.5 }}>{f.value}</p>
-            </div>
-            <span style={{ color: C.teal600, fontSize: 14, cursor: "pointer", marginLeft: 8 }}>✏️</span>
-          </div>
-        ))}
-      </div>
-
-      <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
-        <SecondaryButton label="+ Add More Details" onClick={() => {}} />
-        <PrimaryButton label="✓ Looks Right, Continue" onClick={onNext} />
-      </div>
-    </ScreenShell>
-  );
-}
-
-// ─── Portal Autofill ──────────────────────────────────────────────────────────
-
-function PortalAutofillScreen({ onNext }: { onNext: () => void }) {
-  const [progress, setProgress] = useState(0);
-  const [filledFields, setFilledFields] = useState<number[]>([]);
-
-  const fields = [
-    { label: "Category of Complaint", value: "UPI Payment Fraud" },
-    { label: "Suspect Mobile Number", value: "+91 98765 00021" },
-    { label: "Date of Incident", value: "30/08/2026" },
-    { label: "Amount Involved (₹)", value: "15,000" },
-    { label: "Platform / App Used", value: "PhonePe" },
-  ];
-
-  useEffect(() => {
-    const total = 5000;
-    const start = Date.now();
-    const interval = setInterval(() => {
-      const elapsed = Date.now() - start;
-      const pct = Math.min(100, (elapsed / total) * 100);
-      setProgress(pct);
-      if (pct >= 100) clearInterval(interval);
-    }, 50);
-
-    fields.forEach((_, i) => {
-      setTimeout(() => setFilledFields(prev => [...prev, i]), 800 + i * 900);
-    });
-
-    return () => clearInterval(interval);
-  }, []);
-
-  return (
-    <div style={{ flex: 1, display: "flex", flexDirection: "column", background: C.bgCanvas }}>
-      {/* Progress header */}
-      <div style={{ background: C.teal900, padding: "12px 20px" }}>
-        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 6 }}>
-          <span style={{ color: C.white, fontSize: 12, fontWeight: 600 }}>Auto-filling on cybercrime.gov.in…</span>
-          <span style={{ color: C.mint300, fontSize: 12, fontWeight: 700 }}>{Math.round(progress)}%</span>
-        </div>
-        <div style={{ height: 4, background: "rgba(255,255,255,0.1)", borderRadius: 2, overflow: "hidden" }}>
-          <div style={{ height: "100%", width: `${progress}%`, background: `linear-gradient(90deg, ${C.teal500}, ${C.mint300})`, transition: "width 0.1s linear", borderRadius: 2 }} />
-        </div>
-      </div>
-
-      {/* Mock portal content */}
-      <div style={{ flex: 1, overflowY: "auto", padding: "16px 20px" }}>
-        {/* Portal header */}
-        <div style={{ background: C.white, borderRadius: 14, padding: "14px 16px", marginBottom: 16, display: "flex", gap: 10, alignItems: "center", boxShadow: `0 2px 8px rgba(11,46,46,0.06)` }}>
-          <span style={{ fontSize: 24 }}>🏛️</span>
-          <div>
-            <p style={{ margin: 0, fontSize: 11, fontWeight: 700, color: C.teal600, letterSpacing: "0.06em" }}>NATIONAL CYBER CRIME PORTAL</p>
-            <p style={{ margin: 0, fontSize: 10, color: C.textSecondary }}>Government of India • Official Submission</p>
-          </div>
-        </div>
-
-        <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
-          {fields.map((f, i) => (
-            <AutofillField key={i} label={f.label} value={f.value} filled={filledFields.includes(i)} />
-          ))}
-        </div>
-
-        {/* Trust banner */}
-        <div style={{ background: "#FFFBEB", border: `1px solid ${C.warningIcon}30`, borderRadius: 12, padding: "12px 14px", display: "flex", gap: 8, alignItems: "flex-start", marginTop: 16 }}>
-          <span style={{ fontSize: 14, flexShrink: 0 }}>🔒</span>
-          <div>
-            <p style={{ margin: "0 0 2px", fontSize: 12, fontWeight: 700, color: "#7a4d00" }}>Sathi is auto-filling this securely.</p>
-            <p style={{ margin: 0, fontSize: 11, color: "#7a4d00" }}>Nothing will be submitted without your explicit confirmation on the next screen.</p>
-          </div>
-        </div>
-      </div>
-
-      <div style={{ padding: "12px 20px 12px" }}>
-        <PrimaryButton label="→ Proceed to Verify" disabled={progress < 100} onClick={onNext} />
-      </div>
-    </div>
-  );
-}
-
-function AutofillField({ label, value, filled }: { label: string; value: string; filled: boolean }) {
-  const [displayVal, setDisplayVal] = useState("");
-  const [flash, setFlash] = useState(false);
-
-  useEffect(() => {
-    if (!filled) return;
-    setFlash(true);
-    let i = 0;
-    const t = setInterval(() => {
-      setDisplayVal(value.slice(0, i + 1));
-      i++;
-      if (i >= value.length) { clearInterval(t); setTimeout(() => setFlash(false), 400); }
-    }, 60);
-    return () => clearInterval(t);
-  }, [filled]);
-
-  return (
-    <div style={{ background: C.white, borderRadius: 10, overflow: "hidden", border: `1.5px solid ${flash ? C.teal500 : C.divider}`, transition: "border-color 0.3s" }}>
-      <div style={{ padding: "4px 12px", background: C.bgCanvas, borderBottom: `1px solid ${C.divider}` }}>
-        <p style={{ margin: 0, fontSize: 10, color: C.textSecondary, letterSpacing: "0.06em", textTransform: "uppercase" }}>{label}</p>
-      </div>
-      <div style={{ padding: "8px 12px", minHeight: 34, display: "flex", alignItems: "center" }}>
-        <p style={{ margin: 0, fontSize: 13, color: filled ? C.textPrimary : C.textSecondary, fontStyle: filled ? "normal" : "italic" }}>
-          {filled ? displayVal : "Waiting..."}
-          {filled && displayVal.length < value.length && <span style={{ opacity: 0.5, animation: "blink 0.7s infinite" }}>|</span>}
-        </p>
-      </div>
-    </div>
-  );
-}
-
-// ─── Final Verification ───────────────────────────────────────────────────────
-
-function FinalVerificationScreen({ onNext }: { onNext: () => void }) {
-  const [digits, setDigits] = useState(["", "", "", "", "", ""]);
-  const [captchaInput, setCaptchaInput] = useState("");
-  const [showDemo, setShowDemo] = useState(false);
-  const [autoFilling, setAutoFilling] = useState(false);
-  const inputRefs = useRef<(HTMLInputElement | null)[]>([]);
-
-  useEffect(() => {
-    const t = setTimeout(() => setShowDemo(true), 1500);
-    return () => clearTimeout(t);
-  }, []);
-
-  const handleAutoFill = () => {
-    setShowDemo(false);
-    setAutoFilling(true);
-    DEMO_OTP.split("").forEach((d, i) => {
-      setTimeout(() => {
-        setDigits(prev => { const n = [...prev]; n[i] = d; return n; });
-        if (i < 5) inputRefs.current[i + 1]?.focus();
-      }, i * 160);
-    });
-    setTimeout(() => {
-      setCaptchaInput(DEMO_CAPTCHA);
-      setAutoFilling(false);
-    }, 6 * 160 + 400);
-  };
-
-  const handleDigit = (i: number, val: string) => {
-    if (!/^\d?$/.test(val)) return;
-    const next = [...digits];
-    next[i] = val;
-    setDigits(next);
-    if (val && i < 5) inputRefs.current[i + 1]?.focus();
-  };
-
-  const ready = digits.every(d => d) && captchaInput === DEMO_CAPTCHA;
-
-  return (
-    <div style={{ flex: 1, display: "flex", flexDirection: "column", background: C.bgCanvas, position: "relative" }}>
-      {/* Dark header panel */}
-      <div style={{ background: C.teal900, padding: "20px 20px 28px" }}>
-        <p style={{ margin: "0 0 4px", fontSize: 18, fontWeight: 700, color: C.white, fontFamily: "'Poppins',sans-serif" }}>Final Verification</p>
-        <p style={{ margin: 0, fontSize: 13, color: "rgba(255,255,255,0.5)" }}>Enter the OTP sent by NCRP to verify your Identity</p>
-      </div>
-
-      <div style={{ flex: 1, overflowY: "auto", padding: "24px 20px" }}>
-        {/* OTP */}
-        <p style={{ margin: "0 0 12px", fontSize: 13, fontWeight: 600, color: C.textPrimary }}>NCRP One-Time Password</p>
-        <div style={{ display: "flex", gap: 8, justifyContent: "center", marginBottom: 28 }}>
-          {digits.map((d, i) => (
-            <input
-              key={i}
-              ref={el => { inputRefs.current[i] = el; }}
-              value={d}
-              onChange={e => handleDigit(i, e.target.value)}
-              maxLength={1}
-              style={{
-                width: 46, height: 54, borderRadius: 12,
-                border: `2px solid ${d ? C.teal600 : C.divider}`,
-                background: C.white, fontSize: 22, fontWeight: 700,
-                textAlign: "center", color: C.textPrimary, outline: "none",
-                fontFeatureSettings: "'tnum'",
-                transition: "border-color 0.15s, transform 0.12s",
-                transform: autoFilling && d ? "scale(1.08)" : "scale(1)",
-              }}
-            />
-          ))}
-        </div>
-
-        {/* Captcha */}
-        <p style={{ margin: "0 0 10px", fontSize: 13, fontWeight: 600, color: C.textPrimary }}>Security Code</p>
-        <div style={{ background: C.white, borderRadius: 14, padding: "14px 16px", marginBottom: 12, border: `1px solid ${C.divider}`, display: "flex", alignItems: "center", justifyContent: "space-between" }}>
-          <div style={{
-            fontFamily: "monospace", fontSize: 24, fontWeight: 700,
-            color: C.teal700, letterSpacing: "0.25em",
-            background: `repeating-linear-gradient(45deg, transparent, transparent 2px, rgba(20,107,102,0.05) 2px, rgba(20,107,102,0.05) 4px)`,
-            padding: "4px 12px", borderRadius: 8,
-            textDecoration: "line-through", textDecorationColor: `${C.teal500}50`,
-            filter: "url(#distort)",
-          }}>
-            {DEMO_CAPTCHA}
-          </div>
-          <button style={{ background: "none", border: "none", fontSize: 20, cursor: "pointer" }}>🔄</button>
-        </div>
-        <input
-          value={captchaInput}
-          onChange={e => setCaptchaInput(e.target.value.toUpperCase())}
-          placeholder="Type the security code above"
-          style={{
-            width: "100%", padding: "12px 14px", borderRadius: 12,
-            border: `1.5px solid ${captchaInput === DEMO_CAPTCHA ? C.success : captchaInput.length > 0 ? C.divider : C.divider}`,
-            background: C.white, fontSize: 14, color: C.textPrimary,
-            outline: "none", boxSizing: "border-box",
+            justifyContent: "center",
+            fontSize: 26,
+            color: C.white,
+            fontWeight: 700,
           }}
-        />
-      </div>
-
-      <div style={{ padding: "12px 20px 12px" }}>
-        <PrimaryButton label="🛡 Submit Complaint" disabled={!ready} onClick={onNext} style={{ background: ready ? C.teal900 : undefined }} />
-      </div>
-
-      {/* Demo popup */}
-      {showDemo && (
-        <DemoPopup
-          title="🏛️ NCRP Verification Codes"
-          message="Portal OTP + security code received"
-          code={`OTP: ${DEMO_OTP}  |  Code: ${DEMO_CAPTCHA}`}
-          hint="Tap to auto-fill both"
-          onFill={handleAutoFill}
-          onDismiss={() => setShowDemo(false)}
-        />
-      )}
-    </div>
-  );
-}
-
-// ─── Success ──────────────────────────────────────────────────────────────────
-
-function SuccessScreen({ onTrack, onHome }: { onTrack: () => void; onHome: () => void }) {
-  const [drawn, setDrawn] = useState(false);
-  const [copied, setCopied] = useState(false);
-
-  useEffect(() => {
-    setTimeout(() => setDrawn(true), 200);
-  }, []);
-
-  const copy = () => {
-    setCopied(true);
-    setTimeout(() => setCopied(false), 2000);
-  };
-
-  return (
-    <div style={{ flex: 1, overflowY: "auto", padding: "32px 20px 20px", display: "flex", flexDirection: "column", alignItems: "center", background: C.bgCanvas }}>
-      {/* Success icon */}
-      <div style={{ marginBottom: 24, position: "relative" }}>
-        <svg width="80" height="80" viewBox="0 0 80 80">
-          <circle
-            cx="40" cy="40" r="36"
-            fill={C.success}
-            strokeDasharray="226"
-            strokeDashoffset={drawn ? 0 : 226}
-            style={{ transition: "stroke-dashoffset 0.6s ease-out" }}
-          />
-          <path
-            d="M24 40 L35 51 L56 29"
-            fill="none" stroke="white" strokeWidth="3.5" strokeLinecap="round" strokeLinejoin="round"
-            strokeDasharray="50"
-            strokeDashoffset={drawn ? 0 : 50}
-            style={{ transition: "stroke-dashoffset 0.5s ease-out 0.5s" }}
-          />
-        </svg>
-        {drawn && (
-          <div style={{
-            position: "absolute", inset: -20, borderRadius: "50%",
-            background: `radial-gradient(circle, ${C.success}20, transparent)`,
-            animation: "glow 1.5s ease-out forwards",
-          }} />
+        >
+          {userProfile.displayName
+            ? userProfile.displayName.slice(0, 2).toUpperCase()
+            : "👤"}
+        </div>
+        <p
+          style={{
+            margin: "0 0 2px",
+            fontSize: 17,
+            fontWeight: 700,
+            color: C.textPrimary,
+          }}
+        >
+          {userProfile.displayName || "Complainant"}
+        </p>
+        <p style={{ margin: 0, fontSize: 12, color: C.textSecondary }}>
+          {userProfile.email}
+        </p>
+        {!editing && (
+          <button
+            onClick={startEditing}
+            style={{
+              marginTop: 12,
+              padding: "8px 16px",
+              borderRadius: 20,
+              border: `1.5px solid ${C.teal600}`,
+              background: C.white,
+              color: C.teal600,
+              fontSize: 12,
+              fontWeight: 700,
+              cursor: "pointer",
+            }}
+          >
+            ✏️ Edit Profile
+          </button>
         )}
       </div>
 
-      <h1 style={{ fontFamily: "'Poppins',sans-serif", fontSize: 22, fontWeight: 700, color: C.textPrimary, margin: "0 0 8px", textAlign: "center" }}>
-        Complaint Filed Successfully!
-      </h1>
-      <p style={{ fontSize: 13, color: C.textSecondary, textAlign: "center", margin: "0 0 28px", lineHeight: 1.6 }}>
-        Your report has been officially registered with the National Cyber Crime Portal.
-      </p>
+{editing && (
+        <ProfileSetupScreen
+          userId={userId}
+          userProfile={userProfile}
+          setUserProfile={setUserProfile}
+          onDone={cancelEditing}
+          language={language}
+        />
+      )}
 
-      {/* Tracking number */}
-      <div style={{
-        width: "100%", border: `2px dashed ${C.teal600}40`,
-        borderRadius: 16, padding: "16px 20px",
-        display: "flex", justifyContent: "space-between", alignItems: "center",
-        background: C.white, marginBottom: 24,
-        boxSizing: "border-box",
-      }}>
-        <div>
-          <p style={{ margin: "0 0 4px", fontSize: 10, fontWeight: 700, color: C.textSecondary, letterSpacing: "0.1em", textTransform: "uppercase" }}>NCRP TRACKING NUMBER</p>
-          <p style={{ margin: 0, fontFamily: "monospace", fontSize: 18, fontWeight: 700, color: C.teal700, fontFeatureSettings: "'tnum'" }}>{DEMO_TRACKING}</p>
+      {!editing && (
+      <div
+        style={{
+          background: C.white,
+          borderRadius: 16,
+          overflow: "hidden",
+          marginBottom: 16,
+          border: `1px solid ${C.divider}`,
+        }}
+      >
+        <div
+          style={{
+            padding: "14px 16px",
+            borderBottom: `1px solid ${C.divider}`,
+          }}
+        >
+          <p
+            style={{ margin: "0 0 2px", fontSize: 11, color: C.textSecondary }}
+          >
+            Contact Phone
+          </p>
+          <p
+            style={{
+              margin: 0,
+              fontSize: 14,
+              color: C.textPrimary,
+              fontWeight: 600,
+            }}
+          >
+            {userProfile.phone || "Not provided"}
+          </p>
         </div>
-        <button onClick={copy} style={{
-          background: copied ? C.successBg : C.mint100,
-          border: "none", borderRadius: 10,
-          padding: "8px 12px", cursor: "pointer",
-          fontSize: 12, fontWeight: 600,
-          color: copied ? C.success : C.teal600,
-          transition: "all 0.2s",
-        }}>
-          {copied ? "✓ Copied!" : "📋 Copy"}
-        </button>
-      </div>
 
-      {/* What's next */}
-      <div style={{ width: "100%", background: C.white, borderRadius: 16, padding: "16px 20px", marginBottom: 24, boxSizing: "border-box" }}>
-        <p style={{ margin: "0 0 12px", fontSize: 13, fontWeight: 700, color: C.textPrimary }}>What happens next?</p>
-        {[
-          "NCRP will review the incident within 24–48 hours.",
-          "Sathi will alert your linked bank to flag the fraud transaction.",
-          "You will receive SMS updates at each stage.",
-        ].map((s, i) => (
-          <div key={i} style={{ display: "flex", gap: 10, marginBottom: i < 2 ? 10 : 0 }}>
-            <span style={{ width: 20, height: 20, background: C.mint100, borderRadius: "50%", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 11, fontWeight: 700, color: C.teal600, flexShrink: 0 }}>{i + 1}</span>
-            <p style={{ margin: 0, fontSize: 13, color: C.textSecondary, lineHeight: 1.5 }}>{s}</p>
+        <div
+          style={{
+            padding: "14px 16px",
+            borderBottom: `1px solid ${C.divider}`,
+          }}
+        >
+          <p
+            style={{ margin: "0 0 2px", fontSize: 11, color: C.textSecondary }}
+          >
+            State / Jurisdiction
+          </p>
+          <p
+            style={{
+              margin: 0,
+              fontSize: 14,
+              color: C.textPrimary,
+              fontWeight: 600,
+            }}
+          >
+            {userProfile.stateDistrict || "Not provided"}
+          </p>
+        </div>
+
+        <div
+          style={{
+            padding: "14px 16px",
+            display: "flex",
+            justifyContent: "space-between",
+            alignItems: "center",
+          }}
+        >
+          <div>
+            <p
+              style={{
+                margin: "0 0 2px",
+                fontSize: 11,
+                color: C.textSecondary,
+              }}
+            >
+              App Language
+            </p>
+            <p
+              style={{
+                margin: 0,
+                fontSize: 14,
+                color: C.textPrimary,
+                fontWeight: 600,
+              }}
+            >
+              {language === "hi"
+                ? "हिंदी (Hindi)"
+                : language === "bn"
+                  ? "বাংলা (Bengali)"
+                  : "English"}
+            </p>
           </div>
-        ))}
+          <select
+            value={language}
+            onChange={(e) => setLanguage(e.target.value as "en" | "hi" | "bn")}
+            style={{
+              padding: "6px 10px",
+              borderRadius: 8,
+              border: `1px solid ${C.divider}`,
+              fontSize: 12,
+              background: C.mint100,
+              color: C.teal700,
+              fontWeight: 600,
+            }}
+          >
+            <option value="en">English</option>
+            <option value="hi">हिंदी</option>
+            <option value="bn">বাংলা</option>
+          </select>
+        </div>
       </div>
+      )}
 
-      <div style={{ width: "100%", display: "flex", flexDirection: "column", gap: 10, boxSizing: "border-box" }}>
-        <PrimaryButton label="🔍 Track Status" onClick={onTrack} />
-        <SecondaryButton label="Back to Home" onClick={onHome} />
-      </div>
-
-      <style>{`@keyframes glow { from{opacity:1} to{opacity:0} }`}</style>
-    </div>
-  );
-}
-
-// ─── My Cases ─────────────────────────────────────────────────────────────────
-
-function MyCasesScreen({ onCase }: { onCase: () => void }) {
-  const cases = [
-    { icon: "💳", title: "UPI Payment Fraud", meta: "Lost: ₹15,000 • Aug 30, 2026", status: "In Progress", statusColor: "#FDECC8", statusText: "#9A6100" },
-    { icon: "📱", title: "Electricity Bill SMS Fraud", meta: "Lost: ₹5,000 • Jan 24, 2026", status: "Under Review", statusColor: "#DCEBFB", statusText: "#1A56B0" },
-    { icon: "🌐", title: "Phishing Website - Amazon", meta: "No loss • Dec 10, 2025", status: "Resolved", statusColor: C.successBg, statusText: C.success },
-  ];
-
-  return (
-    <div style={{ flex: 1, overflowY: "auto", background: C.bgCanvas, padding: "16px 20px" }}>
-      <h1 style={{ fontFamily: "'Poppins',sans-serif", fontSize: 22, fontWeight: 700, color: C.textPrimary, margin: "0 0 20px" }}>My Cases</h1>
-      {cases.map((c, i) => (
-        <div key={i} onClick={onCase} style={{
-          background: C.white, borderRadius: 16,
-          padding: "16px", marginBottom: 12,
+      {/* Sign Out Button */}
+      <button
+        onClick={() => void onLogout()}
+        style={{
+          width: "100%",
+          padding: "14px",
+          borderRadius: 24,
+          border: `2px solid ${C.danger}`,
+          background: "transparent",
+          color: C.danger,
+          fontSize: 14,
+          fontWeight: 700,
           cursor: "pointer",
-          boxShadow: `0 4px 12px rgba(11,46,46,0.07)`,
-          display: "flex", gap: 14, alignItems: "center",
-        }}>
-          <div style={{ width: 44, height: 44, background: C.bgCanvas, borderRadius: 12, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 22, flexShrink: 0 }}>{c.icon}</div>
-          <div style={{ flex: 1 }}>
-            <p style={{ margin: "0 0 2px", fontSize: 14, fontWeight: 600, color: C.textPrimary }}>{c.title}</p>
-            <p style={{ margin: 0, fontSize: 11, color: C.textSecondary }}>{c.meta}</p>
-          </div>
-          <span style={{ background: c.statusColor, color: c.statusText, fontSize: 10, fontWeight: 700, padding: "4px 8px", borderRadius: 10, whiteSpace: "nowrap" }}>{c.status}</span>
-        </div>
-      ))}
-    </div>
-  );
-}
-
-// ─── Case Status ──────────────────────────────────────────────────────────────
-
-function CaseStatusScreen({ onBack }: { onBack: () => void }) {
-  const steps = [
-    { label: "Case Filed Successfully", desc: "Complaint registered with NCRP", date: "Aug 30, 2026 • 3:15 PM", state: "done" },
-    { label: "Under Investigation", desc: "Cyber Cell has identified the recipient wallet address.", date: "Aug 31, 2026 • 11:30 AM", state: "active" },
-    { label: "Resolved & Refunded", desc: "Pending resolution", date: "", state: "pending" },
-  ];
-
-  return (
-    <ScreenShell title="Case Status" subtitle="" onBack={onBack}>
-      {/* Case summary */}
-      <div style={{ background: C.white, borderRadius: 16, padding: "16px", marginBottom: 20, boxShadow: `0 4px 12px rgba(11,46,46,0.08)` }}>
-        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 6 }}>
-          <p style={{ margin: 0, fontSize: 11, color: C.textSecondary }}>CASE ID: CS-2026-98</p>
-          <span style={{ background: "#FDECC8", color: "#9A6100", fontSize: 10, fontWeight: 700, padding: "3px 8px", borderRadius: 8 }}>In Progress</span>
-        </div>
-        <p style={{ margin: "0 0 4px", fontSize: 16, fontWeight: 700, color: C.textPrimary }}>UPI Payment Fraud</p>
-        <p style={{ margin: 0, fontSize: 12, color: C.textSecondary }}>Reported Aug 30, 2026 • Lost: ₹15,000</p>
-      </div>
-
-      {/* Stepper */}
-      <p style={{ margin: "0 0 16px", fontSize: 11, fontWeight: 700, letterSpacing: "0.08em", textTransform: "uppercase", color: C.textSecondary }}>Investigation Progress</p>
-      <div style={{ display: "flex", flexDirection: "column" }}>
-        {steps.map((s, i) => (
-          <div key={i} style={{ display: "flex", gap: 14 }}>
-            {/* Left indicator */}
-            <div style={{ display: "flex", flexDirection: "column", alignItems: "center", flexShrink: 0 }}>
-              <div style={{
-                width: 28, height: 28, borderRadius: "50%", flexShrink: 0,
-                background: s.state === "done" ? C.success : s.state === "active" ? C.teal600 : "transparent",
-                border: `2px ${s.state === "pending" ? "dashed" : "solid"} ${s.state === "done" ? C.success : s.state === "active" ? C.teal600 : C.divider}`,
-                display: "flex", alignItems: "center", justifyContent: "center",
-                fontSize: 13, color: C.white,
-                position: "relative",
-              }}>
-                {s.state === "done" ? "✓" : s.state === "active" ? (
-                  <div style={{ width: 10, height: 10, borderRadius: "50%", background: C.white, animation: "blink 1.5s infinite" }} />
-                ) : ""}
-              </div>
-              {i < steps.length - 1 && (
-                <div style={{ width: 2, flex: 1, background: s.state === "done" ? C.success : C.divider, margin: "4px 0", minHeight: 32, borderRadius: 1, borderStyle: i === steps.length - 2 ? "dashed" : "solid", borderColor: "transparent", backgroundImage: s.state !== "done" ? `repeating-linear-gradient(to bottom, ${C.divider} 0, ${C.divider} 6px, transparent 6px, transparent 10px)` : "none" }} />
-              )}
-            </div>
-            {/* Content */}
-            <div style={{ paddingBottom: 24 }}>
-              <p style={{ margin: "2px 0 4px", fontSize: 14, fontWeight: s.state === "active" ? 700 : 500, color: s.state === "pending" ? C.textSecondary : C.textPrimary }}>{s.label}</p>
-              <p style={{ margin: "0 0 2px", fontSize: 12, color: C.textSecondary, lineHeight: 1.5 }}>{s.desc}</p>
-              {s.date && <p style={{ margin: 0, fontSize: 11, color: C.textSecondary }}>{s.date}</p>}
-            </div>
-          </div>
-        ))}
-      </div>
-    </ScreenShell>
-  );
-}
-
-// ─── Defend (Community) ───────────────────────────────────────────────────────
-
-function DefendScreen() {
-  const posts = [
-    { cat: "Electricity SMS Fraud", date: "Aug 29, 2026", loc: "Western Mumbai, MH", count: 412, excerpt: "Received SMS threatening power disconnection unless ₹3,000 paid within 2 hours via a fake link...", votes: 142 },
-    { cat: "Fake Job Offer – Telegram", date: "Aug 28, 2026", loc: "Bangalore, KA", count: 89, excerpt: "WhatsApp message offering ₹800/task data entry job. They ask for ₹500 \"registration fee\" upfront.", votes: 67 },
-    { cat: "UPI QR Code Scam", date: "Aug 27, 2026", loc: "Pune, MH", count: 203, excerpt: "Sent a QR code asking me to \"scan to receive\" ₹50,000 lottery prize. It actually charged my account.", votes: 98 },
-  ];
-
-  return (
-    <div style={{ flex: 1, overflowY: "auto", background: C.bgCanvas, padding: "16px 20px" }}>
-      <h1 style={{ fontFamily: "'Poppins',sans-serif", fontSize: 22, fontWeight: 700, color: C.textPrimary, margin: "0 0 4px" }}>Defend</h1>
-      <p style={{ margin: "0 0 20px", fontSize: 13, color: C.textSecondary }}>Community scam alerts from verified users</p>
-
-      {posts.map((p, i) => (
-        <div key={i} style={{ background: C.white, borderRadius: 16, padding: "16px", marginBottom: 12, boxShadow: `0 4px 12px rgba(11,46,46,0.07)` }}>
-          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
-            <span style={{ background: C.warning, color: "#7a4d00", fontSize: 10, fontWeight: 700, padding: "3px 8px", borderRadius: 8 }}>{p.cat}</span>
-            <span style={{ fontSize: 11, color: C.textSecondary }}>{p.date}</span>
-          </div>
-          <p style={{ margin: "0 0 6px", fontSize: 13, color: C.textPrimary, lineHeight: 1.5 }}>"{p.excerpt}"</p>
-          <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 12 }}>
-            <span style={{ fontSize: 11 }}>📍</span>
-            <span style={{ fontSize: 11, color: C.textSecondary }}>{p.loc}</span>
-            <span style={{ fontSize: 11, color: C.danger, marginLeft: "auto", fontWeight: 600 }}>⚠ Also reported by {p.count} others</span>
-          </div>
-          <div style={{ display: "flex", gap: 8 }}>
-            <button style={{ flex: 1, padding: "8px", borderRadius: 20, background: C.bgCanvas, border: `1px solid ${C.divider}`, fontSize: 12, fontWeight: 600, color: C.textPrimary, cursor: "pointer" }}>
-              🚩 I got this too ({p.votes})
-            </button>
-            <button style={{ padding: "8px 14px", borderRadius: 20, background: C.bgCanvas, border: `1px solid ${C.divider}`, fontSize: 12, color: C.textSecondary, cursor: "pointer" }}>
-              Sounds Fake
-            </button>
-          </div>
-        </div>
-      ))}
-    </div>
-  );
-}
-
-// ─── Profile ──────────────────────────────────────────────────────────────────
-
-function ProfileScreen({ language, setLanguage }: { language: string; setLanguage: (l: "en" | "hi") => void }) {
-  return (
-    <div style={{ flex: 1, overflowY: "auto", background: C.bgCanvas, padding: "20px 20px" }}>
-      {/* Avatar */}
-      <div style={{ textAlign: "center", marginBottom: 24 }}>
-        <div style={{ width: 72, height: 72, borderRadius: "50%", background: `linear-gradient(135deg, ${C.teal600}, ${C.teal500})`, margin: "0 auto 12px", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 26, color: C.white, fontWeight: 700 }}>AK</div>
-        <p style={{ margin: "0 0 2px", fontSize: 17, fontWeight: 700, color: C.textPrimary }}>Arjun Kumar</p>
-        <p style={{ margin: 0, fontSize: 13, color: C.textSecondary }}>+91 98765 43210</p>
-      </div>
-
-      {/* Editable fields */}
-      <div style={{ background: C.white, borderRadius: 16, overflow: "hidden", marginBottom: 16, boxShadow: `0 4px 12px rgba(11,46,46,0.07)` }}>
-        {[
-          { label: "State / District", value: "Maharashtra, Mumbai" },
-          { label: "App Language", value: language === "hi" ? "हिंदी" : "English (Default)", isLang: true },
-        ].map((r, i) => (
-          <div key={i} style={{ padding: "14px 16px", borderBottom: i === 0 ? `1px solid ${C.divider}` : "none", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-            <div>
-              <p style={{ margin: "0 0 1px", fontSize: 11, color: C.textSecondary }}>{r.label}</p>
-              <p style={{ margin: 0, fontSize: 14, color: C.textPrimary }}>{r.value}</p>
-            </div>
-            {r.isLang ? (
-              <select
-                value={language}
-                onChange={e => setLanguage(e.target.value as "en" | "hi")}
-                style={{ border: `1px solid ${C.divider}`, borderRadius: 8, padding: "4px 8px", fontSize: 12, color: C.teal600, background: C.mint100, outline: "none" }}
-              >
-                <option value="en">English</option>
-                <option value="hi">हिंदी</option>
-              </select>
-            ) : (
-              <span style={{ color: C.teal600, fontSize: 14 }}>✏️</span>
-            )}
-          </div>
-        ))}
-      </div>
-
-      {/* Nav rows */}
-      {[
-        { icon: "⚙️", label: "Manage Permissions" },
-        { icon: "🔒", label: "Data & Privacy" },
-      ].map((r, i) => (
-        <div key={i} style={{
-          background: C.white, borderRadius: 14, padding: "14px 16px",
-          display: "flex", gap: 12, alignItems: "center",
-          marginBottom: 10, cursor: "pointer",
-          boxShadow: `0 2px 8px rgba(11,46,46,0.06)`,
-        }}>
-          <span style={{ fontSize: 18 }}>{r.icon}</span>
-          <span style={{ flex: 1, fontSize: 14, color: C.textPrimary }}>{r.label}</span>
-          <span style={{ color: C.textSecondary }}>›</span>
-        </div>
-      ))}
-
-      <button style={{
-        width: "100%", marginTop: 12, padding: "14px",
-        borderRadius: 28, border: `2px solid ${C.danger}`,
-        background: "transparent", color: C.danger,
-        fontSize: 15, fontWeight: 700, cursor: "pointer",
-      }}>
-        Log Out Account
+        }}
+      >
+        Sign Out of Cyber Sathi
       </button>
     </div>
-  );
+  )
 }
 
-// ─── Tab Bar ──────────────────────────────────────────────────────────────────
+// ─── Tab Bar Component ────────────────────────────────────────────────────────
 
-function TabBar({ active, onSwitch }: { active: Tab; onSwitch: (t: Tab) => void }) {
+function TabBar({
+  active,
+  onSwitch,
+}: {
+  active: Tab
+  onSwitch: (t: Tab) => void
+}) {
   const tabs: { key: Tab; icon: string; label: string }[] = [
     { key: "home", icon: "🎙️", label: "Assistant" },
     { key: "my-cases", icon: "📋", label: "My Cases" },
     { key: "defend", icon: "🛡️", label: "Defend" },
     { key: "profile", icon: "👤", label: "Profile" },
-  ];
+  ]
 
   return (
-    <div style={{
-      background: C.white,
-      borderTop: `1px solid ${C.divider}`,
-      display: "flex",
-      height: 64,
-    }}>
-      {tabs.map(t => (
+    <div
+      style={{
+        background: C.white,
+        borderTop: `1px solid ${C.divider}`,
+        display: "flex",
+        height: 62,
+      }}
+    >
+      {tabs.map((t) => (
         <button
           key={t.key}
           onClick={() => onSwitch(t.key)}
           style={{
-            flex: 1, border: "none", background: "transparent",
-            cursor: "pointer", display: "flex", flexDirection: "column",
-            alignItems: "center", justifyContent: "center", gap: 2,
+            flex: 1,
+            border: "none",
+            background: "transparent",
+            cursor: "pointer",
+            display: "flex",
+            flexDirection: "column",
+            alignItems: "center",
+            justifyContent: "center",
+            gap: 2,
             position: "relative",
           }}
         >
           {active === t.key && (
-            <div style={{
-              position: "absolute", top: 8, borderRadius: 14,
-              background: C.mint100,
-              width: 48, height: 30,
-            }} />
+            <div
+              style={{
+                position: "absolute",
+                top: 6,
+                borderRadius: 12,
+                background: C.mint100,
+                width: 44,
+                height: 28,
+              }}
+            />
           )}
-          <span style={{ fontSize: 18, position: "relative", zIndex: 1 }}>{t.icon}</span>
-          <span style={{
-            fontSize: 10, fontWeight: active === t.key ? 700 : 400,
-            color: active === t.key ? C.teal600 : C.textSecondary,
-            position: "relative", zIndex: 1,
-          }}>{t.label}</span>
+          <span style={{ fontSize: 18, position: "relative", zIndex: 1 }}>
+            {t.icon}
+          </span>
+          <span
+            style={{
+              fontSize: 10,
+              fontWeight: active === t.key ? 700 : 400,
+              color: active === t.key ? C.teal600 : C.textSecondary,
+              position: "relative",
+              zIndex: 1,
+            }}
+          >
+            {t.label}
+          </span>
         </button>
       ))}
     </div>
-  );
+  )
 }
 
-// ─── Reusable primitives ──────────────────────────────────────────────────────
+// ─── Button Helpers & Styling ─────────────────────────────────────────────────
 
-function OnboardShell({ step, title, subtitle, children }: { step: number; title: string; subtitle: string; children: React.ReactNode }) {
-  return (
-    <div style={{
-      flex: 1, background: C.teal900, display: "flex", flexDirection: "column",
-      overflow: "hidden",
-    }}>
-      {/* Header */}
-      <div style={{ background: C.teal900, padding: "16px 20px 20px" }}>
-        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 14 }}>
-          <span style={{ fontSize: 12, color: "rgba(255,255,255,0.4)", fontWeight: 600 }}>Step {step} of 4</span>
-          {/* Progress bar */}
-          <div style={{ width: 80, height: 4, background: "rgba(255,255,255,0.15)", borderRadius: 2, overflow: "hidden" }}>
-            <div style={{ height: "100%", width: `${(step / 4) * 100}%`, background: C.mint300, borderRadius: 2, transition: "width 0.5s ease" }} />
-          </div>
-        </div>
-        <h1 style={{ fontFamily: "'Poppins',sans-serif", color: C.white, fontSize: 24, fontWeight: 700, margin: "0 0 4px" }}>{title}</h1>
-        <p style={{ color: "rgba(255,255,255,0.5)", fontSize: 13, margin: 0 }}>{subtitle}</p>
-      </div>
-
-      {/* White card body */}
-      <div style={{
-        flex: 1, background: C.white, borderRadius: "28px 28px 0 0",
-        padding: "24px 20px", overflowY: "auto",
-        display: "flex", flexDirection: "column",
-      }}>
-        {children}
-      </div>
-    </div>
-  );
-}
-
-function ScreenShell({ title, subtitle, onBack, children }: { title: string; subtitle: string; onBack: () => void; children: React.ReactNode }) {
-  return (
-    <div style={{ flex: 1, display: "flex", flexDirection: "column", background: C.bgCanvas }}>
-      <div style={{ padding: "16px 20px 14px", background: C.white, borderBottom: `1px solid ${C.divider}` }}>
-        <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-          <button onClick={onBack} style={{ background: "none", border: "none", cursor: "pointer", fontSize: 18, padding: "4px 0", color: C.teal600 }}>‹</button>
-          <div>
-            <h2 style={{ margin: 0, fontSize: 18, fontWeight: 700, color: C.textPrimary, fontFamily: "'Poppins',sans-serif" }}>{title}</h2>
-            {subtitle && <p style={{ margin: 0, fontSize: 12, color: C.textSecondary }}>{subtitle}</p>}
-          </div>
-        </div>
-      </div>
-      <div style={{ flex: 1, overflowY: "auto", padding: "20px 20px", display: "flex", flexDirection: "column" }}>
-        {children}
-      </div>
-    </div>
-  );
-}
-
-function PrimaryButton({ label, onClick, disabled = false, style = {} }: { label: string; onClick: () => void; disabled?: boolean; style?: React.CSSProperties }) {
+function PrimaryButton({
+  label,
+  onClick,
+  disabled = false,
+  style = {},
+}: {
+  label: string
+  onClick: () => void
+  disabled?: boolean
+  style?: React.CSSProperties
+}) {
   return (
     <button
       onClick={disabled ? undefined : onClick}
+      disabled={disabled}
       style={{
-        width: "100%", padding: "15px 20px",
-        borderRadius: 28, border: "none",
+        width: "100%",
+        padding: "14px 20px",
+        borderRadius: 28,
+        border: "none",
         background: disabled ? "#ccc" : C.teal600,
         color: disabled ? "#888" : C.white,
-        fontSize: 15, fontWeight: 700, cursor: disabled ? "not-allowed" : "pointer",
+        fontSize: 14,
+        fontWeight: 700,
+        cursor: disabled ? "not-allowed" : "pointer",
         transition: "transform 0.1s, background 0.2s",
         ...style,
       }}
-      onMouseDown={e => { if (!disabled) e.currentTarget.style.transform = "scale(0.97)"; }}
-      onMouseUp={e => { e.currentTarget.style.transform = "scale(1)"; }}
     >
       {label}
     </button>
-  );
+  )
 }
 
-function SecondaryButton({ label, onClick }: { label: string; onClick: () => void }) {
-  return (
-    <button
-      onClick={onClick}
-      style={{
-        width: "100%", padding: "14px 20px",
-        borderRadius: 28, border: `2px solid ${C.teal600}`,
-        background: "transparent", color: C.teal600,
-        fontSize: 15, fontWeight: 700, cursor: "pointer",
-        transition: "transform 0.1s",
-      }}
-      onMouseDown={e => (e.currentTarget.style.transform = "scale(0.97)")}
-      onMouseUp={e => (e.currentTarget.style.transform = "scale(1)")}
-    >
-      {label}
-    </button>
-  );
-}
-
-function GhostButton({ label, onClick, style = {} }: { label: string; onClick: () => void; style?: React.CSSProperties }) {
-  return (
-    <button
-      onClick={onClick}
-      style={{
-        background: "none", border: "none",
-        color: C.textSecondary, fontSize: 14,
-        cursor: "pointer", padding: "10px 16px",
-        textDecoration: "underline",
-        ...style,
-      }}
-    >
-      {label}
-    </button>
-  );
-}
-
-function InfoBanner({ text }: { text: string }) {
-  return (
-    <div style={{ background: C.mint100, borderRadius: 14, padding: "12px 14px" }}>
-      <p style={{ margin: 0, fontSize: 12, color: C.teal700, lineHeight: 1.5 }}>{text}</p>
-    </div>
-  );
-}
-
-function SelectableCard({ selected, onSelect, label, sub }: { selected: boolean; onSelect: () => void; label: string; sub: string }) {
-  return (
-    <div
-      onClick={onSelect}
-      style={{
-        background: selected ? C.mint100 : C.white,
-        border: `2px solid ${selected ? C.teal600 : C.divider}`,
-        borderRadius: 16,
-        padding: "14px 16px",
-        display: "flex",
-        justifyContent: "space-between",
-        alignItems: "center",
-        cursor: "pointer",
-        transition: "border-color 0.2s, background 0.2s",
-      } as React.CSSProperties}
-    >
-      <div>
-        <p style={{ margin: "0 0 2px", fontSize: 15, fontWeight: 600, color: C.textPrimary }}>{label}</p>
-        <p style={{ margin: 0, fontSize: 12, color: C.textSecondary }}>{sub}</p>
-      </div>
-      <div style={{
-        width: 24, height: 24, borderRadius: "50%",
-        border: `2px solid ${selected ? C.teal600 : "#ccc"}`,
-        background: selected ? C.teal600 : "transparent",
-        display: "flex", alignItems: "center", justifyContent: "center",
-        fontSize: 12, color: C.white, flexShrink: 0,
-        transition: "all 0.2s",
-      }}>
-        {selected ? "✓" : ""}
-      </div>
-    </div>
-  );
-}
-
-function ToggleRow({ icon, title, desc, on, onToggle }: { icon: string; title: string; desc: string; on: boolean; onToggle: () => void }) {
-  return (
-    <div style={{ display: "flex", gap: 12, alignItems: "center", padding: "14px 16px", background: C.white, borderRadius: 14, boxShadow: `0 2px 8px rgba(11,46,46,0.06)` }}>
-      <div style={{ width: 40, height: 40, borderRadius: "50%", background: C.mint100, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 18, flexShrink: 0 }}>{icon}</div>
-      <div style={{ flex: 1 }}>
-        <p style={{ margin: "0 0 2px", fontSize: 13, fontWeight: 600, color: C.textPrimary }}>{title}</p>
-        <p style={{ margin: 0, fontSize: 11, color: C.textSecondary, lineHeight: 1.4 }}>{desc}</p>
-      </div>
-      {/* Toggle switch */}
-      <div onClick={onToggle} style={{
-        width: 48, height: 28, borderRadius: 14, background: on ? C.teal600 : "#ccc",
-        position: "relative", cursor: "pointer", flexShrink: 0,
-        transition: "background 0.2s",
-      }}>
-        <div style={{
-          width: 22, height: 22, borderRadius: "50%", background: C.white,
-          position: "absolute", top: 3, left: on ? 23 : 3,
-          transition: "left 0.2s ease",
-          boxShadow: "0 2px 4px rgba(0,0,0,0.15)",
-        }} />
-      </div>
-    </div>
-  );
-}
-
-// ─── Demo Popup ───────────────────────────────────────────────────────────────
-
-function DemoPopup({ title, message, code, hint, onFill, onDismiss }: {
-  title: string; message: string; code: string; hint: string;
-  onFill: () => void; onDismiss: () => void;
+function SecondaryButton({
+  label,
+  onClick,
+}: {
+  label: string
+  onClick: () => void
 }) {
   return (
-    <div style={{
-      position: "absolute", inset: 0, background: "rgba(0,0,0,0.45)",
-      display: "flex", alignItems: "flex-end",
-      animation: "fadeIn 0.3s ease",
-      zIndex: 100,
-    }}>
-      {/* Slide-up card */}
-      <div style={{
-        background: C.white,
-        borderRadius: "24px 24px 0 0",
+    <button
+      onClick={onClick}
+      style={{
         width: "100%",
-        padding: "20px 20px 28px",
-        animation: "slideUp 0.35s cubic-bezier(0.34,1.56,0.64,1)",
-      }}>
-        <div style={{ width: 40, height: 4, background: "#ddd", borderRadius: 2, margin: "0 auto 16px" }} />
+        padding: "13px 20px",
+        borderRadius: 28,
+        border: `2px solid ${C.teal600}`,
+        background: "transparent",
+        color: C.teal600,
+        fontSize: 14,
+        fontWeight: 700,
+        cursor: "pointer",
+      }}
+    >
+      {label}
+    </button>
+  )
+}
 
-        {/* Demo badge */}
-        <div style={{ display: "inline-flex", alignItems: "center", gap: 6, background: "#EFF6FF", borderRadius: 8, padding: "4px 10px", marginBottom: 12 }}>
-          <div style={{ width: 7, height: 7, borderRadius: "50%", background: "#3B82F6", animation: "blink 1s infinite" }} />
-          <span style={{ fontSize: 10, fontWeight: 700, color: "#1D4ED8", letterSpacing: "0.06em" }}>PROTOTYPE DEMO MODE</span>
-        </div>
+const labelStyle: React.CSSProperties = {
+  display: "block",
+  marginBottom: 6,
+  fontSize: 12,
+  fontWeight: 700,
+  color: C.textPrimary,
+}
 
-        <h3 style={{ margin: "0 0 6px", fontSize: 17, fontWeight: 700, color: C.textPrimary }}>{title}</h3>
-        <p style={{ margin: "0 0 16px", fontSize: 13, color: C.textSecondary }}>{message}</p>
-
-        {/* Code display */}
-        <div style={{
-          background: C.teal900,
-          borderRadius: 14,
-          padding: "16px 20px",
-          textAlign: "center",
-          marginBottom: 16,
-        }}>
-          <p style={{ margin: "0 0 4px", fontSize: 10, color: "rgba(255,255,255,0.4)", letterSpacing: "0.1em", textTransform: "uppercase" }}>Demo Code</p>
-          <p style={{
-            margin: 0, fontFamily: "monospace",
-            fontSize: 28, fontWeight: 700,
-            color: C.mint300, letterSpacing: "0.2em",
-            fontFeatureSettings: "'tnum'",
-          }}>{code}</p>
-        </div>
-
-        <p style={{ textAlign: "center", fontSize: 12, color: C.textSecondary, margin: "0 0 16px" }}>{hint}</p>
-
-        <div style={{ display: "flex", gap: 10 }}>
-          <button onClick={onDismiss} style={{ flex: 1, padding: "12px", borderRadius: 22, border: `1.5px solid ${C.divider}`, background: "transparent", color: C.textSecondary, fontSize: 14, cursor: "pointer" }}>
-            Dismiss
-          </button>
-          <button onClick={onFill} style={{ flex: 2, padding: "12px", borderRadius: 22, border: "none", background: C.teal600, color: C.white, fontSize: 14, fontWeight: 700, cursor: "pointer" }}>
-            ✨ Auto-Fill
-          </button>
-        </div>
-      </div>
-
-      <style>{`
-        @keyframes slideUp { from{transform:translateY(100%)} to{transform:translateY(0)} }
-        @keyframes fadeIn { from{opacity:0} to{opacity:1} }
-      `}</style>
-    </div>
-  );
+const inputStyle: React.CSSProperties = {
+  width: "100%",
+  boxSizing: "border-box",
+  border: `1.5px solid ${C.divider}`,
+  borderRadius: 12,
+  padding: "12px 14px",
+  color: C.textPrimary,
+  background: C.white,
+  fontSize: 14,
+  outline: "none",
 }
