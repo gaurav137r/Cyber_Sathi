@@ -1579,8 +1579,16 @@ function AgentChatScreen({
       setIsListening(false)
       return
     }
+    if (!window.isSecureContext) {
+      window.alert(
+        "Microphone access requires HTTPS or localhost. Open Cyber Sathi through its secure app URL, then try again.",
+      )
+      return
+    }
     if (!navigator.mediaDevices?.getUserMedia || typeof MediaRecorder === "undefined") {
-      window.alert("Microphone recording is unavailable here. Please type your message.")
+      window.alert(
+        "This browser does not support microphone recording. Please use a current browser or type your message.",
+      )
       return
     }
     try {
@@ -1611,8 +1619,17 @@ function AgentChatScreen({
       }
       recorder.start()
       setIsListening(true)
-    } catch {
-      window.alert("Microphone access was denied or is unavailable. You can type your message instead.")
+    } catch (error) {
+      const name = error instanceof DOMException ? error.name : "UnknownError"
+      const detail =
+        name === "NotAllowedError"
+          ? "Allow microphone access for this site. If the app is inside a preview frame, open it directly or allow microphone access to the frame."
+          : name === "NotFoundError"
+            ? "No microphone was found on this device."
+            : name === "NotReadableError"
+              ? "The microphone is busy or unavailable to the browser."
+              : `Microphone error (${name}). Check this site's microphone permission and try again.`
+      window.alert(`${detail} You can type your message instead.`)
     }
   }
 

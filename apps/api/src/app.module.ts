@@ -19,7 +19,9 @@ import { StorageModule } from "./storage/storage.module"
     ConfigModule.forRoot({
       isGlobal: true,
       cache: true,
-      envFilePath: [".env", "../../.env"],
+      // `pnpm --filter @cybersathi/api start:dev` runs from apps/api.
+      // Load its local values first, then the repository root's shared secrets.
+      envFilePath: [".env", "../.env"],
       validate: validateEnv,
     }),
     LoggerModule.forRoot({

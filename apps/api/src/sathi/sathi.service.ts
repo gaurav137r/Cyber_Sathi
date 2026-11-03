@@ -183,7 +183,13 @@ export class SathiService {
         role: "user",
 
         parts: [
-          { functionResponse: { name: call.name, response: toolResult } },
+          {
+            functionResponse: {
+              ...(call.id ? { id: call.id } : {}),
+              name: call.name,
+              response: toolResult,
+            },
+          },
         ],
       })
 

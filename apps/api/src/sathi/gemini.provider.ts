@@ -15,9 +15,13 @@ type GeminiPart = {
 
   thought?: boolean
 
-  functionCall?: { name: string; args?: Record<string, unknown> }
+  functionCall?: { id?: string; name: string; args?: Record<string, unknown> }
 
-  functionResponse?: { name: string; response: Record<string, unknown> }
+  functionResponse?: {
+    id?: string
+    name: string
+    response: Record<string, unknown>
+  }
 
   inlineData?: { mimeType: string; data: string }
 }
@@ -44,7 +48,11 @@ export type GeminiTurnResult = {
 
   modelParts: GeminiPart[]
 
-  functionCalls: Array<{ name: string; args: Record<string, unknown> }>
+  functionCalls: Array<{
+    id?: string
+    name: string
+    args: Record<string, unknown>
+  }>
 }
 
 export type GeminiLiveSession = {
@@ -202,6 +210,7 @@ export class GeminiProvider {
       .filter((part) => part.functionCall?.name)
 
       .map((part) => ({
+        id: part.functionCall!.id,
         name: part.functionCall!.name,
         args: part.functionCall!.args ?? {},
       }))

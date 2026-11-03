@@ -51,7 +51,7 @@ export const envSchema = z.object({
     .url()
     .default("https://generativelanguage.googleapis.com"),
   GEMINI_LIVE_MODEL: z.string().min(1).default("gemini-3.8-live"),
-  GEMINI_TEXT_MODEL: z.string().min(1).default("gemini-2.5-flash"),
+  GEMINI_TEXT_MODEL: z.string().min(1).default("gemini-3.6-flash"),
   GEMINI_VOICE_NAME: z.string().min(1).default("Kore"),
   CLASSIFICATION_CONFIDENCE_THRESHOLD: z.coerce
     .number()
