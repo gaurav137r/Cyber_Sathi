@@ -1,9 +1,10 @@
 import Constants from "expo-constants"
 
-import { useRef } from "react"
+import { useEffect, useRef } from "react"
 
 import {
   PermissionsAndroid,
+  Platform,
   SafeAreaView,
   StyleSheet,
   Text,
@@ -18,7 +19,15 @@ const appUrl =
   (expoHost ? `http://${expoHost}:8443` : null)
 
 export default function App() {
-  const webViewRef = useRef<WebView>(null)
+  const webViewRef = useRef<WebView<any>>(null)
+
+  useEffect(() => {
+    if (Platform.OS === "android") {
+      void PermissionsAndroid.request(
+        PermissionsAndroid.PERMISSIONS.RECORD_AUDIO,
+      ).catch(() => undefined)
+    }
+  }, [])
 
   if (!appUrl) {
     return (
@@ -32,35 +41,62 @@ export default function App() {
     )
   }
 
+  const handlePermissionResult = (granted: boolean) => {
+    webViewRef.current?.injectJavaScript(
+      `window.dispatchEvent(new MessageEvent('message', { data: ${JSON.stringify(
+        JSON.stringify({
+          type: "SATHI_MICROPHONE_RESULT",
+          granted,
+        }),
+      )} })); true;`,
+    )
+  }
+
+  const handleWebViewMessage = async (event: any) => {
+    try {
+      const payload = JSON.parse(event.nativeEvent.data) as {
+        type?: string
+      }
+
+      if (payload.type === "SATHI_REQUEST_MICROPHONE") {
+        if (Platform.OS !== "android") {
+          handlePermissionResult(true)
+          return
+        }
+        const result = await PermissionsAndroid.request(
+          PermissionsAndroid.PERMISSIONS.RECORD_AUDIO,
+        )
+        handlePermissionResult(result === PermissionsAndroid.RESULTS.GRANTED)
+        return
+      }
+
+      if (payload.type !== "SATHI_PICK_PHONE_NUMBER") return
+      // Android cannot silently read call logs or SMS. Sathi asks the user to
+      // choose a number in the in-app picker or type it themselves.
+      event.target?.injectJavaScript?.(
+        `window.dispatchEvent(new MessageEvent('message', { data: ${JSON.stringify(
+          JSON.stringify({
+            type: "SATHI_PHONE_PICKER_RESULT",
+            available: false,
+          }),
+        )} })); true;`,
+      )
+    } catch {
+      return
+    }
+  }
+
   return (
     <View style={styles.container}>
       <WebView
+        ref={webViewRef}
         source={{ uri: appUrl }}
         style={styles.webview}
         javaScriptEnabled
         domStorageEnabled
         mediaPlaybackRequiresUserGesture={false}
         allowsInlineMediaPlayback
-        onMessage={(event) => {
-          try {
-            const payload = JSON.parse(event.nativeEvent.data) as {
-              type?: string
-            }
-            if (payload.type !== "SATHI_PICK_PHONE_NUMBER") return
-            // Android cannot silently read call logs or SMS. Sathi asks the user to
-            // choose a number in the in-app picker or type it themselves.
-            event.target?.injectJavaScript?.(
-              `window.dispatchEvent(new MessageEvent('message', { data: ${JSON.stringify(
-                JSON.stringify({
-                  type: "SATHI_PHONE_PICKER_RESULT",
-                  available: false,
-                }),
-              )} })); true;`,
-            )
-          } catch {
-            return
-          }
-        }}
+        onMessage={handleWebViewMessage}
         onPermissionRequest={(request) => {
           // Only the trusted app origin may request microphone access. Ask Android
           // through its runtime permission API before granting the WebView request.

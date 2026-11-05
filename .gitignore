@@ -16,6 +16,9 @@ build/
 .vite/
 vite.config.*.timestamp-*
 
+# Expo
+.expo/
+
 # Logs
 logs/
 *.log
@@ -63,3 +66,10 @@ Thumbs.db
 
 # Keep this file local; do not commit or push it
 .gitignore
+
+# Local Android signing material; keep this file local as well.
+/cyber-sathi-release.jks
+/keystore.b64
+/.aider-desk/
+/package-lock.json
+/skills-lock.json

@@ -12,6 +12,10 @@ import {
 } from "./lib/sathi"
 import { fetchUserCases, saveReviewedCase, type CaseRecord } from "./lib/cases"
 import { ensureProfile, updateProfile } from "./lib/profiles"
+import {
+  getMicrophoneErrorMessage,
+  requestMicrophoneAccess,
+} from "./lib/microphone"
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -186,7 +190,9 @@ export default function App() {
     else if (tab === "profile") go("profile")
   }
 
-  const startNewReport = async (initialTopic?: string) => {
+  const [autoStartMic, setAutoStartMic] = useState(false)
+
+  const startNewReport = async (initialTopic?: string, enableMic = false) => {
     setSathiCaseId(null)
     setSathiFacts(null)
     const greetingText = initialTopic
@@ -213,6 +219,7 @@ export default function App() {
       isComplete: false,
     })
 
+    setAutoStartMic(enableMic)
     go("agent-chat")
     try {
       const session = await startSathiSession(language)
@@ -357,6 +364,7 @@ export default function App() {
               previousFacts={sathiFacts}
               setPreviousFacts={setSathiFacts}
               language={language}
+              autoStartMic={autoStartMic}
               onProceedToReview={() => go("review-report")}
               onBack={() => go("home")}
             />
@@ -1117,17 +1125,34 @@ function HomeScreen({
   recentCases,
   language,
 }: {
-  onStartReport: (topic?: string) => void
+  onStartReport: (topic?: string, enableMic?: boolean) => void
   onViewCase: (c: CaseRecord) => void
   recentCases: CaseRecord[]
   language: string
 }) {
   const [pulse, setPulse] = useState(false)
+  const [micStatus, setMicStatus] = useState("")
+  const [micBusy, setMicBusy] = useState(false)
 
   useEffect(() => {
     const t = setInterval(() => setPulse((p) => !p), 1200)
     return () => clearInterval(t)
   }, [])
+
+  const handleMicrophone = async () => {
+    setMicBusy(true)
+    setMicStatus("")
+    try {
+      const stream = await requestMicrophoneAccess()
+      stream.getTracks().forEach((track) => track.stop())
+      setMicStatus("Microphone access granted. Starting voice intake...")
+      onStartReport(undefined, true)
+    } catch (error) {
+      setMicStatus(getMicrophoneErrorMessage(error))
+    } finally {
+      setMicBusy(false)
+    }
+  }
 
   const topics = [
     {
@@ -1278,20 +1303,24 @@ function HomeScreen({
             }}
           />
           <button
-            onClick={() => onStartReport()}
+            onClick={handleMicrophone}
+            disabled={micBusy}
             style={{
               width: 92,
               height: 92,
               borderRadius: "50%",
               background: `linear-gradient(135deg, ${C.teal600}, ${C.teal500})`,
               border: "none",
-              cursor: "pointer",
+              cursor: micBusy ? "not-allowed" : "pointer",
               display: "flex",
               alignItems: "center",
               justifyContent: "center",
               fontSize: 36,
               boxShadow: `0 8px 30px ${C.teal600}60`,
+              opacity: micBusy ? 0.7 : 1,
             }}
+            aria-label="Microphone"
+            title="Tap to grant microphone access and start voice intake"
           >
             🎙️
           </button>
@@ -1299,8 +1328,22 @@ function HomeScreen({
         <p
           style={{ fontSize: 13, fontWeight: 600, color: C.teal700, margin: 0 }}
         >
-          Tap Orb to Start Incident Intake
+          {micBusy ? "Requesting microphone..." : "Tap Orb to Start Voice Intake"}
         </p>
+        {micStatus && (
+          <p
+            role="status"
+            style={{
+              margin: "8px 0 0",
+              fontSize: 11,
+              color: C.textSecondary,
+              textAlign: "center",
+              lineHeight: 1.4,
+            }}
+          >
+            {micStatus}
+          </p>
+        )}
       </div>
 
       {/* Common Scam Incident Categories */}
@@ -1470,6 +1513,7 @@ function AgentChatScreen({
   previousFacts,
   setPreviousFacts,
   language,
+  autoStartMic = false,
   onProceedToReview,
   onBack,
 }: {
@@ -1481,18 +1525,30 @@ function AgentChatScreen({
   previousFacts: SathiFacts | null
   setPreviousFacts: React.Dispatch<React.SetStateAction<SathiFacts | null>>
   language: "en" | "hi" | "bn"
+  autoStartMic?: boolean
   onProceedToReview: () => void
   onBack: () => void
 }) {
   const [inputText, setInputText] = useState("")
   const [isListening, setIsListening] = useState(false)
+  const [isBrowserListening, setIsBrowserListening] = useState(false)
+  const [micStatus, setMicStatus] = useState("")
   const [loadingReply, setLoadingReply] = useState(false)
   const [showExtractedPanel, setShowExtractedPanel] = useState(false)
   const messagesEndRef = useRef<HTMLDivElement>(null)
   const recorderRef = useRef<MediaRecorder | null>(null)
+  const speechRecognitionRef = useRef<any>(null)
   const audioChunksRef = useRef<Blob[]>([])
   const speechAudioRef = useRef<HTMLAudioElement | null>(null)
   const lastSpokenReplyRef = useRef<string | null>(null)
+  const autoStartAttemptedRef = useRef(false)
+
+  useEffect(() => {
+    if (autoStartMic && caseId && !isListening && !autoStartAttemptedRef.current) {
+      autoStartAttemptedRef.current = true
+      void toggleMic()
+    }
+  }, [autoStartMic, caseId, isListening])
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" })
@@ -1580,19 +1636,18 @@ function AgentChatScreen({
       return
     }
     if (!window.isSecureContext) {
-      window.alert(
-        "Microphone access requires HTTPS or localhost. Open Cyber Sathi through its secure app URL, then try again.",
-      )
+      setMicStatus("Microphone access requires HTTPS or localhost.")
       return
     }
     if (!navigator.mediaDevices?.getUserMedia || typeof MediaRecorder === "undefined") {
-      window.alert(
-        "This browser does not support microphone recording. Please use a current browser or type your message.",
+      setMicStatus(
+        "Audio recording is unavailable. Try browser speech recognition below.",
       )
       return
     }
     try {
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: true })
+      setMicStatus("")
+      const stream = await requestMicrophoneAccess()
       const recorder = new MediaRecorder(stream)
       recorderRef.current = recorder
       audioChunksRef.current = []
@@ -1600,6 +1655,14 @@ function AgentChatScreen({
       recorder.onstop = () => {
         const recorded = new Blob(audioChunksRef.current, { type: recorder.mimeType || "audio/webm" })
         stream.getTracks().forEach((track) => track.stop())
+        if (!caseId) {
+          setMicStatus(
+            recorded.size
+              ? "Microphone recording succeeded. Start a Sathi session to send audio to the agent."
+              : "No audio was captured. Check the microphone and try again.",
+          )
+          return
+        }
         if (recorded.size) void recorded.arrayBuffer().then(async (buffer) => {
           const AudioContextClass = window.AudioContext || (window as any).webkitAudioContext
           const context = new AudioContextClass()
@@ -1607,11 +1670,9 @@ function AgentChatScreen({
             const decoded = await context.decodeAudioData(buffer)
             void submitTurn({ audio: new Blob([audioBufferToWav(decoded)], { type: "audio/wav" }) })
           } catch {
-            setMessages((prev) => [...prev, {
-              id: `agent-audio-error-${Date.now()}`, sender: "agent",
-              text: "I couldn't read that recording. Please try again or type your message.",
-              timestamp: new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }),
-            }])
+            setMicStatus(
+              "The recording format could not be decoded. Try browser speech recognition below.",
+            )
           } finally {
             await context.close()
           }
@@ -1629,7 +1690,69 @@ function AgentChatScreen({
             : name === "NotReadableError"
               ? "The microphone is busy or unavailable to the browser."
               : `Microphone error (${name}). Check this site's microphone permission and try again.`
-      window.alert(`${detail} You can type your message instead.`)
+      setMicStatus(`${detail} You can also try browser speech recognition below.`)
+    }
+  }
+
+  const toggleBrowserSpeech = () => {
+    if (isBrowserListening) {
+      speechRecognitionRef.current?.stop()
+      return
+    }
+
+    const SpeechRecognition =
+      (window as any).SpeechRecognition ||
+      (window as any).webkitSpeechRecognition
+    if (!SpeechRecognition) {
+      setMicStatus(
+        "Browser speech recognition is not supported here. Try audio recording or type your message.",
+      )
+      return
+    }
+    if (!window.isSecureContext) {
+      setMicStatus("Microphone access requires HTTPS or localhost.")
+      return
+    }
+
+    const recognition = new SpeechRecognition()
+    recognition.lang =
+      language === "hi" ? "hi-IN" : language === "bn" ? "bn-IN" : "en-IN"
+    recognition.continuous = false
+    recognition.interimResults = true
+    recognition.onresult = (event: any) => {
+      const transcript = Array.from(event.results)
+        .map((result: any) => result[0]?.transcript ?? "")
+        .join("")
+        .trim()
+      if (transcript) setInputText(transcript)
+    }
+    recognition.onerror = (event: { error?: string }) => {
+      setIsBrowserListening(false)
+      const detail =
+        event.error === "not-allowed" || event.error === "service-not-allowed"
+          ? "Allow microphone access for this site in your browser settings."
+          : event.error === "no-speech"
+            ? "No speech was detected. Try again and speak after listening starts."
+            : `Browser speech recognition failed${event.error ? ` (${event.error})` : ""}.`
+      setMicStatus(detail)
+    }
+    recognition.onend = () => setIsBrowserListening(false)
+    speechRecognitionRef.current = recognition
+    setMicStatus(
+      caseId
+        ? "Browser speech recognition is listening. Review the transcript before sending it to Sathi."
+        : "Browser speech recognition is listening. A Sathi session is required to send the transcript.",
+    )
+    setIsBrowserListening(true)
+    try {
+      recognition.start()
+    } catch (error) {
+      setIsBrowserListening(false)
+      setMicStatus(
+        error instanceof Error
+          ? `Could not start browser speech recognition: ${error.message}`
+          : "Could not start browser speech recognition.",
+      )
     }
   }
 
@@ -1935,7 +2058,7 @@ function AgentChatScreen({
         <button
           type="button"
           onClick={toggleMic}
-          disabled={!caseId || loadingReply}
+          disabled={loadingReply}
           style={{
             width: 44,
             height: 44,
@@ -1959,7 +2082,7 @@ function AgentChatScreen({
         <input
           type="text"
           value={inputText}
-          disabled={!caseId || loadingReply}
+          disabled={loadingReply}
           onChange={(e) => setInputText(e.target.value)}
           onKeyDown={(e) => {
             if (e.key === "Enter") {
@@ -1968,11 +2091,9 @@ function AgentChatScreen({
             }
           }}
           placeholder={
-            !caseId
-              ? "Starting secure Sathi session..."
-              : isListening
+            isListening
                 ? "Listening... speak now"
-                : "Type incident details here..."
+                : "Type or dictate incident details..."
           }
           style={{
             flex: 1,
@@ -2012,8 +2133,57 @@ function AgentChatScreen({
         </button>
       </div>
 
+      <div
+        style={{
+          padding: "0 16px 6px",
+          background: C.white,
+          display: "flex",
+          alignItems: "center",
+          gap: 8,
+        }}
+      >
+        <button
+          type="button"
+          onClick={toggleBrowserSpeech}
+          disabled={loadingReply}
+          style={{
+            border: 0,
+            padding: "4px 0",
+            background: "transparent",
+            color: C.teal700,
+            fontSize: 11,
+            fontWeight: 700,
+            textDecoration: "underline",
+            cursor: loadingReply ? "not-allowed" : "pointer",
+          }}
+        >
+          {isBrowserListening
+            ? "Stop browser speech recognition"
+            : "Try browser speech recognition"}
+        </button>
+        {!caseId && (
+          <span style={{ fontSize: 10, color: C.danger }}>
+            Sathi session unavailable
+          </span>
+        )}
+      </div>
+      {micStatus && (
+        <p
+          role="status"
+          style={{
+            margin: 0,
+            padding: "2px 16px 8px",
+            background: C.white,
+            color: C.textSecondary,
+            fontSize: 10,
+            lineHeight: 1.4,
+          }}
+        >
+          {micStatus}
+        </p>
+      )}
       <p style={{ margin: "-4px 16px 8px", fontSize: 10, color: C.textSecondary, background: C.white }}>
-        After voice input, type here to add or correct details with Sathi. Voice recordings are sent to Gemini; API credentials stay on the server.
+        Browser speech recognition creates a transcript in this browser session. Review it before sending. Recorded audio is sent to Sathi when a session is available.
       </p>
 
       <style>{`
