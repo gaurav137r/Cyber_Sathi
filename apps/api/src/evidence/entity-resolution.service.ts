@@ -63,12 +63,18 @@ export class EntityResolutionService {
           sourceTypes: [sourceType],
         })
     }
+    const fields: Array<keyof ExtractedEntities> = [
+      "phoneNumbers",
+      "upiIds",
+      "urls",
+      "amounts",
+    ]
     for (const source of sources)
-      for (const field of Object.keys(result) as (keyof ExtractedEntities)[])
+      for (const field of fields)
         for (const value of source.entities[field])
           add(field, value, source.evidenceId, source.sourceType)
     if (transcript)
-      for (const field of Object.keys(result) as (keyof ExtractedEntities)[])
+      for (const field of fields)
         for (const value of transcript[field])
           add(field, value, "case-transcript", "voice-transcript")
     return result

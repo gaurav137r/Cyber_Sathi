@@ -48,6 +48,28 @@ export type SathiResponse = {
 
   reply: string | null
 
+  conversation?: Array<{
+    role: "user" | "model"
+    text: string
+  }>
+
+  caseSnapshot?: {
+    structuredFields: Record<string, unknown> | null
+    evidence: Array<{
+      id: string
+      type: string
+      fileName: string
+      extractedEntities: Record<string, unknown> | null
+      uploadedAt: string
+    }>
+    latestReport: {
+      id: string
+      version: number
+      content: Record<string, unknown>
+      generatedAt: string
+    } | null
+  } | null
+
   facts: SathiFacts
 
   clientAction: {
@@ -84,6 +106,8 @@ export type SathiResponse = {
     inputAudio: { mimeType: string; rateHz: number }
 
     outputAudio: { mimeType: string; rateHz: number }
+
+    setupConfig?: Record<string, unknown>
   } | null
 }
 
@@ -214,6 +238,31 @@ export async function startSathiSession(
   return readJson<SathiResponse>(response)
 }
 
+export async function resumeSathiSession(
+  caseId: string,
+  language: string,
+): Promise<SathiResponse> {
+  const headers = await authHeader()
+  const response = await fetch(
+    `${apiBaseUrl.replace(/\/+$/, "")}/cases/${encodeURIComponent(caseId)}/sathi/session`,
+    {
+      method: "POST",
+      headers: { ...headers, "Content-Type": "application/json" },
+      body: JSON.stringify({ language }),
+    },
+  )
+  return readJson<SathiResponse>(response)
+}
+
+export async function getSathiState(caseId: string): Promise<SathiResponse> {
+  const headers = await authHeader()
+  const response = await fetch(
+    `${apiBaseUrl.replace(/\/+$/, "")}/cases/${encodeURIComponent(caseId)}/sathi`,
+    { headers },
+  )
+  return readJson<SathiResponse>(response)
+}
+
 export async function sendSathiTurn(
   caseId: string,
 
@@ -245,6 +294,27 @@ export async function sendSathiTurn(
   )
 
   return readJson<SathiResponse>(response)
+}
+
+export async function saveSathiTranscript(
+  caseId: string,
+  input: { role: "user" | "agent"; text: string },
+): Promise<void> {
+  const text = input.text.trim()
+  if (!text) return
+  const headers = await authHeader()
+  const response = await fetch(
+    `${apiBaseUrl.replace(/\/+$/, "")}/cases/${encodeURIComponent(caseId)}/sathi/transcript`,
+    {
+      method: "POST",
+      headers: { ...headers, "Content-Type": "application/json" },
+      body: JSON.stringify({
+        role: input.role === "agent" ? "model" : "user",
+        text,
+      }),
+    },
+  )
+  await readJson<{ saved: boolean }>(response)
 }
 
 export async function generateSathiSpeech(

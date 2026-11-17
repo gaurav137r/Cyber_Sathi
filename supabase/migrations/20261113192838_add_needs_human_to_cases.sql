@@ -1,0 +1,2 @@
+ALTER TABLE public.cases
+  ADD COLUMN IF NOT EXISTS needs_human BOOLEAN NOT NULL DEFAULT false;

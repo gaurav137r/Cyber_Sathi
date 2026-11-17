@@ -45,6 +45,14 @@ export type SathiFacts = {
 
   description: string | null
 
+  /** Canonical NCRP-style intake values. The agent records only values the
+   * user explicitly confirms; unavailable fields are omitted. */
+  portalFields: Record<string, unknown>
+
+  /** Unconfirmed fields read from uploaded evidence or a voice-call transcript.
+   * The agent must ask the user to confirm or correct them. */
+  evidenceCandidates: Record<string, unknown>
+
   missingFields: string[]
 
   intakeComplete: boolean
@@ -110,6 +118,10 @@ export const emptySathiFacts = (): SathiFacts => ({
   transactionIds: [],
 
   description: null,
+
+  portalFields: {},
+
+  evidenceCandidates: {},
 
   missingFields: ["narrative"],
 

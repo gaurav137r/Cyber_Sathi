@@ -4,6 +4,7 @@ import {
   EvidenceController,
 } from "./evidence.controller"
 import { EvidenceService } from "./evidence.service"
+import { EvidenceExtractionService } from "./evidence-extraction.service"
 import { EntityResolutionService } from "./entity-resolution.service"
 import { OCR_SERVICE } from "./ocr.service"
 import { TesseractOcrProvider } from "./ocr.service"
@@ -12,6 +13,7 @@ import { TesseractOcrProvider } from "./ocr.service"
   controllers: [EvidenceController, CaseEvidenceController],
   providers: [
     EvidenceService,
+    EvidenceExtractionService,
     EntityResolutionService,
     TesseractOcrProvider,
     { provide: OCR_SERVICE, useExisting: TesseractOcrProvider },

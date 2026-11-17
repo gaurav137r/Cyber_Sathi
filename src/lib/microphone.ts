@@ -22,13 +22,18 @@ export async function requestAndroidMicrophonePermission(): Promise<boolean> {
 
   return new Promise<boolean>((resolve) => {
     const target = (window as any).ReactNativeWebView
+    let timeout: number
+    const cleanup = () => {
+      window.clearTimeout(timeout)
+      window.removeEventListener("message", handleMessage)
+    }
 
     const handleMessage = (event: MessageEvent) => {
       try {
         const data =
           typeof event.data === "string" ? JSON.parse(event.data) : event.data
         if (data?.type === "SATHI_MICROPHONE_RESULT") {
-          window.removeEventListener("message", handleMessage)
+          cleanup()
           resolve(Boolean(data.granted))
         }
       } catch {
@@ -36,32 +41,36 @@ export async function requestAndroidMicrophonePermission(): Promise<boolean> {
       }
     }
 
-    window.addEventListener("message", handleMessage)
-    target.postMessage(JSON.stringify({ type: "SATHI_REQUEST_MICROPHONE" }))
-
-    window.setTimeout(() => {
-      window.removeEventListener("message", handleMessage)
+    timeout = window.setTimeout(() => {
+      cleanup()
       resolve(false)
     }, 10000)
+    window.addEventListener("message", handleMessage)
+    try {
+      target.postMessage(JSON.stringify({ type: "SATHI_REQUEST_MICROPHONE" }))
+    } catch {
+      cleanup()
+      resolve(false)
+    }
   })
 }
 
 export async function requestMicrophoneAccess(): Promise<MediaStream> {
-  if (isAndroidWebView()) {
-    const granted = await requestAndroidMicrophonePermission()
-    if (!granted) {
-      throw new DOMException(
-        "Microphone permission was denied.",
-        "NotAllowedError",
-      )
-    }
-  }
-
   if (!isSecureContextAvailable()) {
     throw new DOMException(
       "Microphone access requires HTTPS or localhost.",
       "SecurityError",
     )
+  }
+
+  if (isAndroidWebView()) {
+    const granted = await requestAndroidMicrophonePermission()
+    if (!granted) {
+      throw new DOMException(
+        "Microphone permission was denied or the Android app did not respond.",
+        "NotAllowedError",
+      )
+    }
   }
 
   if (!navigator.mediaDevices?.getUserMedia) {

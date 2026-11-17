@@ -1,1 +1,1 @@
-export { PrismaService } from "../prisma/prisma.service"
+export { PrismaService, withDbRetry } from "../prisma/prisma.service"

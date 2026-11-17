@@ -1,23 +1,22 @@
 import { Module } from "@nestjs/common"
-import { BhashiniProvider } from "./bhashini.provider"
-import { SPEECH_SERVICE } from "./speech-provider"
-import { TEXT_TO_SPEECH_SERVICE } from "./tts-provider"
-import { TtsService } from "./tts.service"
 import { VoiceController } from "./voice.controller"
 import { VoiceService } from "./voice.service"
-import { VoiceWorkerService } from "./voice-worker.service"
-import { EvidenceModule } from "../evidence/evidence.module"
+import { FallbackSttService } from "./fallback-stt.service"
+import { FallbackTtsService } from "./fallback-tts.service"
+import { KeyPool } from "../ai/key-pool"
+import { AiGateway } from "../ai/ai-gateway.service"
+import { BlandService } from "../sathi/bland.service"
 
 @Module({
-  imports: [EvidenceModule],
   controllers: [VoiceController],
   providers: [
-    BhashiniProvider,
     VoiceService,
-    TtsService,
-    VoiceWorkerService,
-    { provide: SPEECH_SERVICE, useExisting: BhashiniProvider },
-    { provide: TEXT_TO_SPEECH_SERVICE, useExisting: BhashiniProvider },
+    FallbackSttService,
+    FallbackTtsService,
+    KeyPool,
+    AiGateway,
+    BlandService,
   ],
+  exports: [VoiceService, FallbackSttService, FallbackTtsService],
 })
 export class VoiceModule {}

@@ -1,85 +1,146 @@
 import {
-  BadRequestException,
   Body,
   Controller,
-  Get,
-  Param,
   Post,
-  Query,
   Req,
-  UploadedFile,
   UseGuards,
-  UseInterceptors,
+  Param,
+  Get,
+  HttpCode,
+  HttpStatus,
 } from "@nestjs/common"
-import {
-  ApiBearerAuth,
-  ApiConsumes,
-  ApiOperation,
-  ApiTags,
-} from "@nestjs/swagger"
-import { FileInterceptor } from "@nestjs/platform-express"
+import type { Request } from "express"
+import { ApiBearerAuth, ApiOperation, ApiTags, ApiConsumes, ApiBody } from "@nestjs/swagger"
 import { AuthUser } from "../auth/auth.service"
 import { CurrentUser } from "../auth/current-user.decorator"
 import { JwtAuthGuard } from "../auth/jwt-auth.guard"
-import { SummaryAudioDto, VoiceIntakeQueryDto } from "./voice.dto"
-import { VoiceService } from "./voice.service"
-import { TtsService } from "./tts.service"
+import { IsOptional, IsString, MaxLength } from "class-validator"
+import { VoiceService, VoiceMode, VoiceTurnResult } from "./voice.service"
+import { FallbackSttService, SttResult } from "./fallback-stt.service"
+import { FallbackTtsService, TtsResult } from "./fallback-tts.service"
 
-@Controller("cases")
+class StartVoiceSessionDto {
+  @IsOptional()
+  @IsString()
+  @MaxLength(10)
+  language?: string
+}
+
+class VoiceTurnDto {
+  audioBase64: string
+  mimeType: string
+}
+
+class TtsRequestDto {
+  text: string
+  language?: "hi" | "en"
+}
+
+@Controller("cases/:id/voice")
 @UseGuards(JwtAuthGuard)
 @ApiTags("voice")
 @ApiBearerAuth()
 export class VoiceController {
   constructor(
     private readonly voice: VoiceService,
-    private readonly tts: TtsService,
+    private readonly stt: FallbackSttService,
+    private readonly tts: FallbackTtsService,
   ) {}
 
-  @Post(":id/voice-intake")
-  @UseInterceptors(
-    FileInterceptor("audio", { limits: { fileSize: 25 * 1024 * 1024 } }),
-  )
+  @Post("session")
+  @ApiOperation({ summary: "Start a voice session (tries Bland first, falls back)" })
+  async startSession(
+    @Param("id") caseId: string,
+    @CurrentUser() user: AuthUser,
+    @Body() body: StartVoiceSessionDto,
+  ) {
+    const session = await this.voice.startSession(caseId, user.id, body.language || "hi", {} as any)
+    return {
+      mode: session.mode,
+      sessionToken: session.blandSessionToken,
+      authorization: session.blandSessionToken,
+      message: session.mode === "fallback" ? "Fallback voice active — quality may vary" : undefined,
+    }
+  }
+
+  @Post("turn")
+  @ApiOperation({ summary: "Process a voice turn (audio in, text+audio out)" })
   @ApiConsumes("multipart/form-data")
-  @ApiOperation({
-    summary: "Upload audio and enqueue asynchronous transcription",
+  @ApiBody({
+    schema: {
+      type: "object",
+      properties: {
+        audio: { type: "string", format: "binary" },
+      },
+    },
   })
-  voiceIntake(
-    @Param("id") id: string,
-    @Query() query: VoiceIntakeQueryDto,
-    @UploadedFile() audio: Express.Multer.File | undefined,
+  async processTurn(
+    @Param("id") caseId: string,
     @CurrentUser() user: AuthUser,
-    @Req() request: { requestId?: string },
-  ) {
-    if (!audio)
-      throw new BadRequestException(
-        'A multipart audio field named "audio" is required',
-      )
-    return this.voice.enqueue(
-      id,
-      audio,
-      user,
-      query.language,
-      request.requestId,
-    )
+    @Req() req: Request,
+  ): Promise<VoiceTurnResult> {
+    // Handle multipart form data with audio file
+    const contentType = req.headers["content-type"] || ""
+    if (!contentType.includes("multipart/form-data")) {
+      return {
+        mode: "text-only",
+        text: "Audio file required",
+        error: "Expected multipart/form-data with audio file",
+      }
+    }
+
+    // For simplicity, expecting base64 in body (adjust for actual file upload handling)
+    const body = req.body as any
+    if (!body.audioBase64) {
+      return {
+        mode: "text-only",
+        text: "Audio data required",
+        error: "No audioBase64 in request",
+      }
+    }
+
+    const audioBuffer = Buffer.from(body.audioBase64, "base64")
+    const mimeType = body.mimeType || "audio/webm"
+
+    return this.voice.processVoiceTurn(caseId, user.id, audioBuffer, mimeType)
   }
 
-  @Get(":id/voice-intake/:jobId")
-  @ApiOperation({ summary: "Poll asynchronous transcription progress" })
-  progress(
-    @Param("id") id: string,
-    @Param("jobId") jobId: string,
+  @Post("stt")
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({ summary: "Transcribe audio using fallback STT (Groq → Cloudflare)" })
+  async transcribe(
+    @Param("id") caseId: string,
     @CurrentUser() user: AuthUser,
-  ) {
-    return this.voice.progress(id, jobId, user)
+    @Body() body: VoiceTurnDto,
+  ): Promise<SttResult> {
+    const audioBuffer = Buffer.from(body.audioBase64, "base64")
+    return this.stt.transcribe(audioBuffer, body.mimeType)
   }
 
-  @Post(":id/summary/audio")
-  @ApiOperation({ summary: "Generate and return a signed summary-audio URL" })
-  summaryAudio(
-    @Param("id") id: string,
-    @Body() body: SummaryAudioDto,
+  @Post("tts")
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({ summary: "Synthesize speech using fallback TTS (Fish → Google)" })
+  async synthesize(
+    @Param("id") caseId: string,
+    @CurrentUser() user: AuthUser,
+    @Body() body: TtsRequestDto,
+  ): Promise<TtsResult> {
+    return this.tts.synthesize(body.text, body.language || "hi")
+  }
+
+  @Get("session")
+  @ApiOperation({ summary: "Get current voice session status" })
+  getSession(
+    @Param("id") caseId: string,
     @CurrentUser() user: AuthUser,
   ) {
-    return this.tts.synthesize(id, body.text, body.language, user)
+    const session = this.voice.getSession(caseId, user.id)
+    if (!session) return { active: false }
+    return {
+      active: true,
+      mode: session.mode,
+      fallbackTurnCount: session.fallbackTurnCount,
+      language: session.language,
+    }
   }
 }

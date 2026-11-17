@@ -1,5 +1,6 @@
 import { apiRequest } from "./api"
 import type { ExtractedCaseData } from "./ai"
+import { confirmCaseReview, getCaseState } from "./case-interactions"
 
 export interface CaseRecord {
   id: string
@@ -20,6 +21,12 @@ export interface CaseRecord {
   complainantName: string
   complainantPhone: string
   complainantLocation: string
+  reviewed: boolean
+}
+
+export function isCaseOpen(record: Pick<CaseRecord, "status">): boolean {
+  const s = String(record.status || "").toUpperCase()
+  return !["FILED", "RESOLVED", "ARCHIVED"].includes(s)
 }
 
 type ApiCase = {
@@ -43,6 +50,13 @@ function asString(value: unknown): string {
 function mapApiCase(record: ApiCase): CaseRecord {
   const fields = record.structuredFields ?? {}
   const transcript = record.canonicalTranscript || record.rawTranscript || ""
+  const sathi = fields.__sathi
+  const reviewed =
+    typeof sathi === "object" &&
+    sathi !== null &&
+    !Array.isArray(sathi) &&
+    typeof (sathi as Record<string, unknown>).confirmedRevision === "string" &&
+    Boolean((sathi as Record<string, unknown>).confirmedRevision)
 
   return {
     id: record.id,
@@ -63,12 +77,23 @@ function mapApiCase(record: ApiCase): CaseRecord {
     complainantName: asString(fields.complainantName),
     complainantPhone: asString(fields.complainantPhone),
     complainantLocation: asString(fields.complainantLocation),
+    reviewed,
   }
 }
 
 export async function fetchUserCases(): Promise<CaseRecord[]> {
   const records = await apiRequest<ApiCase[]>("/cases")
   return records.map(mapApiCase)
+}
+
+export async function compileCaseReport(
+  caseId: string,
+  expectedRevision: string,
+): Promise<{ id: string; version: number; content: Record<string, unknown> }> {
+  return apiRequest(`/cases/${encodeURIComponent(caseId)}/compile-report`, {
+    method: "POST",
+    body: JSON.stringify({ expectedRevision }),
+  })
 }
 
 export async function saveReviewedCase(
@@ -81,35 +106,54 @@ export async function saveReviewedCase(
     stateDistrict: string
   },
 ): Promise<CaseRecord> {
-  const current = await apiRequest<ApiCase>(
+  const state = await getCaseState(caseId)
+  const record = await apiRequest<ApiCase>(
     `/cases/${encodeURIComponent(caseId)}`,
+    {
+      method: "PATCH",
+      body: JSON.stringify({
+        expectedRevision: state.revision,
+        category: data.category || undefined,
+        structuredFields: {
+          amount: data.amount,
+          suspectPhone: data.suspectPhone,
+          phone: data.suspectPhone,
+          suspectUpi: data.suspectUpi,
+          upiId: data.suspectUpi,
+          suspectDetails: data.suspectDetails,
+          url: data.suspectDetails,
+          platform: data.platform,
+          bankOrApp: data.platform,
+          incidentDate: data.incidentDate,
+          summary: data.summary,
+          description: data.complaintNarrative,
+          actionRequested: data.actionRequested,
+          complainantName: complainant.displayName,
+          complainantPhone: complainant.phone,
+          complainantEmail: complainant.email,
+          complainantLocation: complainant.stateDistrict,
+        },
+      }),
+    },
   )
-  const record = await apiRequest<ApiCase>(`/cases/${encodeURIComponent(caseId)}`, {
-    method: "PATCH",
-    body: JSON.stringify({
-      category: data.category || undefined,
-      structuredFields: {
-        ...current.structuredFields,
-        amount: data.amount,
-        suspectPhone: data.suspectPhone,
-        phone: data.suspectPhone,
-        suspectUpi: data.suspectUpi,
-        upiId: data.suspectUpi,
-        suspectDetails: data.suspectDetails,
-        url: data.suspectDetails,
-        platform: data.platform,
-        bankOrApp: data.platform,
-        incidentDate: data.incidentDate,
-        summary: data.summary,
-        description: data.complaintNarrative,
-        actionRequested: data.actionRequested,
-        complainantName: complainant.displayName,
-        complainantPhone: complainant.phone,
-        complainantEmail: complainant.email,
-        complainantLocation: complainant.stateDistrict,
-      },
-    }),
-  })
 
   return mapApiCase(record)
+}
+
+/**
+ * Locks in the user's edited values and lets the backend compile the final
+ * internal report for that exact revision. Both steps are best-effort on the
+ * second call so a slow report model cannot lose the user's saved corrections.
+ */
+export async function confirmAndCompileCase(caseId: string): Promise<void> {
+  const afterSave = await getCaseState(caseId)
+  const confirmation = await confirmCaseReview(caseId, afterSave.revision)
+  try {
+    await apiRequest(`/cases/${encodeURIComponent(caseId)}/compile-report`, {
+      method: "POST",
+      body: JSON.stringify({ expectedRevision: confirmation.confirmedRevision }),
+    })
+  } catch (error) {
+    console.warn("Case saved and confirmed, but report compilation failed:", error)
+  }
 }

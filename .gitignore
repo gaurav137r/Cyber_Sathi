@@ -31,6 +31,8 @@ apps/api/prisma/*.db-journal
 # Local object storage / compose volumes (if bound)
 .tmp-*
 .docker-data/
+# Generated poster artwork and other local app data
+.data/
 
 # IDE / OS
 .DS_Store

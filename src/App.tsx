@@ -1,25 +1,43 @@
+import LoadingScreen from "./LoadingScreen"
+
+// ─── Screen type enum
+type Screen = "loading" | "auth" | "onboard-profile" | "home" | "agent-chat" | "review-report" | "report-summary" | "success" | "my-cases" | "case-status" | "defend" | "profile" | "filing-preview"
+
+// Add loading to the activeCaseStorageKey and lastScreenStorageKey if needed
 import { useState, useEffect, useRef } from "react"
 import { supabase } from "./lib/supabase"
+import { apiRequest } from "./lib/api"
 import type { ChatMessage, ExtractedCaseData } from "./lib/ai"
 import {
   generateSathiSpeech,
   mergeSathiFactsIntoReport,
+  resumeSathiSession,
+  saveSathiTranscript,
   sendSathiTurn,
   sathiFactsToReport,
   startSathiSession,
   type SathiFacts,
   type SathiResponse,
 } from "./lib/sathi"
-import { fetchUserCases, saveReviewedCase, type CaseRecord } from "./lib/cases"
-import { ensureProfile, updateProfile } from "./lib/profiles"
+import {
+  fetchUserCases,
+  isCaseOpen,
+  saveReviewedCase,
+  confirmAndCompileCase,
+  type CaseRecord,
+} from "./lib/cases"
+import { uploadCaseEvidence } from "./lib/evidence"
+import { ensureProfile } from "./lib/profiles"
 import {
   getMicrophoneErrorMessage,
   requestMicrophoneAccess,
 } from "./lib/microphone"
+import { BLAND_AGENT_ID, useBlandVoiceAgent } from "./lib/bland-voice"
+import ReportSummaryScreen from "./components/ReportSummaryScreen"
+import QuickOnboardScreen from "./components/QuickOnboardScreen"
+import ProfileScreen from "./components/ProfileScreen"
 
 // ─── Types ────────────────────────────────────────────────────────────────────
-
-type Screen = "loading" | "auth" | "onboard-profile" | "home" | "agent-chat" | "review-report" | "success" | "my-cases" | "case-status" | "defend" | "profile"
 
 type Tab = "home" | "my-cases" | "defend" | "profile"
 
@@ -41,6 +59,191 @@ const C = {
   success: "#3FAE5C",
   successBg: "#DFF3E4",
   divider: "#E6E8E6",
+}
+
+const activeCaseStorageKey = (userId: string) =>
+  `cyber-sathi:active-case:${userId}`
+
+const lastReportStorageKey = (userId: string) =>
+  `cyber-sathi:last-report:${userId}`
+
+const lastScreenStorageKey = "cyber-sathi:last-screen"
+
+const evidenceFieldLabels: Record<string, string> = {
+  amount: "Amount",
+  currency: "Currency",
+  incident_datetime: "Date/time",
+  bank_or_app: "Bank or app",
+  provisional_fraud_category: "Fraud type",
+  suspect_phone: "Suspect phone",
+  upi_id: "UPI ID",
+  url: "Link",
+  transaction_id: "Transaction/UTR",
+  victim_phone: "Your phone",
+  caller_name: "Caller name",
+  description: "What happened",
+  sms_content: "Message text",
+  uncertainty: "Unclear",
+}
+
+function summarizeExtractedEvidence(entities: Record<string, unknown>): string {
+  const lines: string[] = []
+  for (const [key, label] of Object.entries(evidenceFieldLabels)) {
+    const value = entities[key]
+    if (value === null || value === undefined || value === "") continue
+    const display = Array.isArray(value) ? value.join(", ") : String(value)
+    const trimmed = display.replace(/\s+/g, " ").trim()
+    if (!trimmed) continue
+    lines.push(
+      `• ${label}: ${trimmed.slice(0, 180)}${trimmed.length > 180 ? "…" : ""}`,
+    )
+  }
+  return lines.join("\n")
+}
+
+const restorableScreens: Screen[] = [
+  "home",
+  "my-cases",
+  "defend",
+  "profile",
+  "agent-chat",
+  "review-report",
+  "report-summary",
+  "case-status",
+]
+
+function readLastScreen(): Screen | null {
+  try {
+    const value = window.sessionStorage.getItem(lastScreenStorageKey)
+    return value && restorableScreens.includes(value as Screen)
+      ? value as Screen
+      : null
+  } catch {
+    return null
+  }
+}
+
+function caseRecordToReport(record: CaseRecord): ExtractedCaseData {
+  return {
+    category: record.category,
+    amount: record.amount,
+    suspectPhone: record.suspectPhone,
+    suspectUpi: record.suspectUpi,
+    suspectDetails: record.suspectDetails,
+    platform: record.platform,
+    incidentDate: record.incidentDate,
+    summary: record.summary,
+    complaintNarrative: record.complaintNarrative,
+    actionRequested: record.actionRequested,
+    isComplete: !isCaseOpen(record),
+  }
+}
+
+function caseSnapshotToReport(
+  snapshot: SathiResponse["caseSnapshot"],
+  fallback: ExtractedCaseData,
+): ExtractedCaseData {
+  const fields = snapshot?.structuredFields
+  if (!fields) return fallback
+  const candidates =
+    typeof fields.extractedCandidates === "object" &&
+    fields.extractedCandidates !== null &&
+    !Array.isArray(fields.extractedCandidates)
+      ? fields.extractedCandidates as Record<string, unknown>
+      : {}
+  const value = (key: string) => {
+    const candidate = fields[key] ?? candidates[key]
+    return typeof candidate === "string" || typeof candidate === "number"
+      ? String(candidate)
+      : ""
+  }
+  return {
+    ...fallback,
+    category: value("category") || fallback.category,
+    amount: value("amount") || fallback.amount,
+    suspectPhone:
+      value("suspectPhone") ||
+      value("suspect_phone") ||
+      value("phone") ||
+      fallback.suspectPhone,
+    suspectUpi:
+      value("suspectUpi") ||
+      value("upi_id") ||
+      value("upiId") ||
+      fallback.suspectUpi,
+    suspectDetails:
+      value("suspectDetails") || value("url") || fallback.suspectDetails,
+    platform:
+      value("platform") ||
+      value("bank_or_app") ||
+      value("bankOrApp") ||
+      fallback.platform,
+    incidentDate:
+      value("incidentDate") ||
+      value("incident_datetime") ||
+      value("date") ||
+      fallback.incidentDate,
+    summary: value("summary") || value("description") || fallback.summary,
+    complaintNarrative: value("description") || fallback.complaintNarrative,
+  }
+}
+
+function conversationToChatMessages(
+  conversation: SathiResponse["conversation"] = [],
+): ChatMessage[] {
+  return conversation.flatMap((message, index) =>
+    transcriptToChatMessages(
+      message.text,
+      message.role === "model" ? "agent" : "user",
+      `restored-${index}`,
+    ),
+  )
+}
+
+function transcriptToChatMessages(
+  transcript: string,
+  fallbackSender: ChatMessage["sender"],
+  idPrefix: string,
+): ChatMessage[] {
+  const markers = [
+    ...transcript.matchAll(
+      /(?:^|\n)\s*(agent|assistant|sathi|user|victim)\s*:\s*/gi,
+    ),
+  ]
+
+  if (!markers.length) {
+    return transcript.trim()
+      ? [
+          {
+            id: `${idPrefix}-0`,
+            sender: fallbackSender,
+            text: transcript.trim(),
+            timestamp: "Earlier",
+          },
+        ]
+      : []
+  }
+
+  return markers.flatMap((marker, index) => {
+    const start = (marker.index ?? 0) + marker[0].length
+    const end =
+      index + 1 < markers.length
+        ? (markers[index + 1].index ?? transcript.length)
+        : transcript.length
+    const text = transcript.slice(start, end).trim()
+    if (!text) return []
+
+    return [
+      {
+        id: `${idPrefix}-${index}`,
+        sender: /^(agent|assistant|sathi)$/i.test(marker[1])
+          ? "agent" as const
+          : "user" as const,
+        text,
+        timestamp: "Earlier",
+      },
+    ]
+  })
 }
 
 // ─── Main Application ─────────────────────────────────────────────────────────
@@ -84,6 +287,27 @@ export default function App() {
   const [casesError, setCasesError] = useState("")
   const [activeCase, setActiveCase] = useState<CaseRecord | null>(null)
   const [submittedCase, setSubmittedCase] = useState<CaseRecord | null>(null)
+  const restoringActiveCaseRef = useRef(false)
+  // Tracks which user session has already been bootstrapped. Supabase replays
+  // SIGNED_IN when a tab becomes visible again, and that must not re-run the
+  // login flow (which navigates back to Home).
+  const establishedUserIdRef = useRef<string | null>(null)
+  // Latest screen, so async auth callbacks can avoid clobbering an active flow.
+  const screenRef = useRef<Screen>("loading")
+
+  // Keep the screen ref truthful and remember the last meaningful screen.
+  // Some browser workspaces unload/reload a tab when you switch away; this lets
+  // the app resume the review screen instead of dropping back to Home.
+  useEffect(() => {
+    screenRef.current = screen
+    if (screen === "loading" || screen === "auth" || screen === "success")
+      return
+    try {
+      window.sessionStorage.setItem(lastScreenStorageKey, screen)
+    } catch {
+      // Session storage can be unavailable; navigation still works without it.
+    }
+  }, [screen])
 
   // 1. Check real Supabase Authentication session on boot
   useEffect(() => {
@@ -91,27 +315,60 @@ export default function App() {
       try {
         const {
           data: { session },
+          error: sessionError,
         } = await supabase.auth.getSession()
+        if (sessionError) {
+          console.error("Supabase session error:", sessionError.message)
+          establishedUserIdRef.current = null
+          screenRef.current = "auth"
+          setScreen("auth")
+          return
+        }
         if (session?.user) {
+          console.log("Auth session found, user ID:", session.user.id)
           await handleSessionEstablished(session.user)
         } else {
+          console.log("No auth session, showing auth screen")
+          establishedUserIdRef.current = null
+          screenRef.current = "auth"
           setScreen("auth")
         }
       } catch (err) {
-        console.warn("Auth check note:", err)
+        console.error(
+          "Auth check failed:",
+          err instanceof Error ? err.message : err,
+        )
+        establishedUserIdRef.current = null
+        screenRef.current = "auth"
         setScreen("auth")
       }
     }
 
     void initAuth()
 
-    // Listen to real-time auth changes
+    // Listen to real-time auth changes.
+    //
+    // Supabase fires SIGNED_IN again from _recoverAndRefresh() every time the
+    // tab becomes visible (switching browser tabs, OS windows or browser
+    // workspaces). Treating that as a new login used to run
+    // handleSessionEstablished(), which navigates to Home and discards the
+    // in-progress chat. Bootstrap the session once per signed-in user instead.
     const {
       data: { subscription },
-    } = supabase.auth.onAuthStateChange((_event, session) => {
+    } = supabase.auth.onAuthStateChange((event, session) => {
       if (session?.user) {
-        void handleSessionEstablished(session.user)
-      } else {
+        setSessionUser(session.user)
+        if (event === "SIGNED_IN") void handleSessionEstablished(session.user)
+        return
+      }
+      if (event === "SIGNED_OUT") {
+        establishedUserIdRef.current = null
+        screenRef.current = "auth"
+        try {
+          window.sessionStorage.removeItem(lastScreenStorageKey)
+        } catch {
+          // Ignore storage failures.
+        }
         setSessionUser(null)
         setScreen("auth")
       }
@@ -123,11 +380,17 @@ export default function App() {
   }, [])
 
   async function handleSessionEstablished(user: any) {
+    // Idempotent per user. Supabase re-emits SIGNED_IN on tab focus, and the
+    // auth-ended callback can arrive at the same time as the explicit sign-in
+    // callback; neither may restart the flow or navigate away.
+    if (establishedUserIdRef.current === user.id) return
+    establishedUserIdRef.current = user.id
+
     setSessionUser(user)
     const meta = user.user_metadata || {}
     const phone = meta.phone_e164 || meta.phone || ""
     const loc = meta.state_district || meta.state || ""
-    const lang = (meta.preferred_language as "en" | "hi" | "bn") || "en"
+    const lang = meta.preferred_language as "en" | "hi" | "bn" || "en"
 
     let name =
       meta.full_name || meta.displayName || user.email?.split("@")[0] || ""
@@ -152,10 +415,86 @@ export default function App() {
 
     void loadCases(user.id)
 
+    // Only advance a session that is still booting/signing in. If the user is
+    // already in a report, keep the current screen untouched.
+    const isBootstrapping =
+      screenRef.current === "loading" || screenRef.current === "auth"
+
     if (!name || name === user.email?.split("@")[0]) {
-      setScreen("onboard-profile")
-    } else {
-      setScreen("home")
+      if (isBootstrapping) {
+        screenRef.current = "onboard-profile"
+        setScreen("onboard-profile")
+      }
+      return
+    }
+
+    if (!isBootstrapping) return
+
+    // A real page reload (some browser workspaces discard/reload tabs when you
+    // switch away) should resume where the user left off instead of Home.
+    const savedScreen = readLastScreen()
+
+    if (savedScreen === "report-summary") {
+      const reportId = window.localStorage.getItem(
+        lastReportStorageKey(user.id),
+      )
+      if (reportId) {
+        try {
+          const records = await fetchUserCases()
+          const report = records.find((record) => record.id === reportId)
+          if (report) {
+            setSubmittedCase(report)
+            setActiveCase(report)
+            setExtractedData(caseRecordToReport(report))
+            screenRef.current = "report-summary"
+            setScreen("report-summary")
+            return
+          }
+        } catch (error) {
+          console.warn("Could not restore the saved report:", error)
+        }
+      }
+    }
+
+    if (
+      savedScreen === "my-cases" ||
+      savedScreen === "defend" ||
+      savedScreen === "profile"
+    ) {
+      screenRef.current = savedScreen
+      setScreen(savedScreen)
+      return
+    }
+
+    screenRef.current = "home"
+    setScreen("home")
+    void restoreActiveReport(user.id, lang, savedScreen)
+  }
+
+  async function restoreActiveReport(
+    userId: string,
+    lang: "en" | "hi" | "bn",
+    resumeScreen: Screen | null = null,
+  ) {
+    if (restoringActiveCaseRef.current) return
+    const caseId = window.localStorage.getItem(activeCaseStorageKey(userId))
+    if (!caseId) return
+    restoringActiveCaseRef.current = true
+    try {
+      const records = await fetchUserCases()
+      const savedCase = records.find((record) => record.id === caseId)
+      if (savedCase && isCaseOpen(savedCase)) {
+        await continueReport(savedCase, lang)
+        if (resumeScreen === "review-report") go("review-report")
+        else if (resumeScreen === "case-status") go("case-status")
+      } else {
+        window.localStorage.removeItem(activeCaseStorageKey(userId))
+      }
+    } catch (error) {
+      // Keep the key: an offline launch should resume once connectivity returns.
+      console.warn("Could not restore the active report:", error)
+    } finally {
+      restoringActiveCaseRef.current = false
     }
   }
 
@@ -224,6 +563,11 @@ export default function App() {
     try {
       const session = await startSathiSession(language)
       setSathiCaseId(session.caseId)
+      if (sessionUser?.id)
+        window.localStorage.setItem(
+          activeCaseStorageKey(sessionUser.id),
+          session.caseId,
+        )
       setSathiFacts(session.facts)
       setExtractedData(sathiFactsToReport(session.facts))
       setChatMessages([
@@ -232,8 +576,11 @@ export default function App() {
           sender: "agent",
           text: initialTopic
             ? `Let's talk about ${initialTopic}. ${session.reply ?? greetingText}`
-            : session.reply ?? greetingText,
-          timestamp: new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }),
+            : (session.reply ?? greetingText),
+          timestamp: new Date().toLocaleTimeString([], {
+            hour: "2-digit",
+            minute: "2-digit",
+          }),
         },
       ])
     } catch (error) {
@@ -241,8 +588,102 @@ export default function App() {
         {
           id: `msg-error-${Date.now()}`,
           sender: "agent",
-          text: error instanceof Error ? error.message : "Sathi is unavailable right now. Please try again.",
-          timestamp: new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }),
+          text:
+            error instanceof Error
+              ? error.message
+              : "Sathi is unavailable right now. Please try again.",
+          timestamp: new Date().toLocaleTimeString([], {
+            hour: "2-digit",
+            minute: "2-digit",
+          }),
+        },
+      ])
+    }
+  }
+
+  const continueReport = async (
+    caseRecord: CaseRecord,
+    resumeLanguage: "en" | "hi" | "bn" = language,
+  ) => {
+    setActiveCase(caseRecord)
+    // A report that the user already reviewed and saved is a finished
+    // document. Reopen its summary/download page instead of a blank chat.
+    if (caseRecord.reviewed) {
+      setSubmittedCase(caseRecord)
+      setSathiCaseId(caseRecord.id)
+      setSathiFacts(null)
+      setExtractedData(caseRecordToReport(caseRecord))
+      go("report-summary")
+      return
+    }
+    setAutoStartMic(false)
+    setSathiCaseId(caseRecord.id)
+    if (sessionUser?.id)
+      window.localStorage.setItem(
+        activeCaseStorageKey(sessionUser.id),
+        caseRecord.id,
+      )
+    setSathiFacts(null)
+    setExtractedData(caseRecordToReport(caseRecord))
+    setChatMessages([
+      {
+        id: `restoring-${Date.now()}`,
+        sender: "agent",
+        text: "Restoring your saved report…",
+        timestamp: new Date().toLocaleTimeString([], {
+          hour: "2-digit",
+          minute: "2-digit",
+        }),
+      },
+    ])
+    go("agent-chat")
+
+    try {
+      const session = await resumeSathiSession(caseRecord.id, resumeLanguage)
+      const restoredMessages = conversationToChatMessages(session.conversation)
+      setSathiCaseId(session.caseId)
+      setSathiFacts(session.facts)
+      setExtractedData((current) =>
+        mergeSathiFactsIntoReport(
+          caseSnapshotToReport(session.caseSnapshot, current),
+          session.facts,
+        ),
+      )
+      setChatMessages(
+        restoredMessages.length
+          ? restoredMessages
+          : [
+              ...transcriptToChatMessages(
+                caseRecord.complaintNarrative || caseRecord.summary,
+                "user",
+                `saved-statement-${Date.now()}`,
+              ),
+              {
+                id: `resumed-${Date.now()}`,
+                sender: "agent" as const,
+                text:
+                  session.reply ??
+                  "Your saved report is ready. What would you like to add or correct?",
+                timestamp: new Date().toLocaleTimeString([], {
+                  hour: "2-digit",
+                  minute: "2-digit",
+                }),
+              },
+            ],
+      )
+    } catch (error) {
+      setChatMessages([
+        {
+          id: `resume-error-${Date.now()}`,
+          sender: "agent",
+          text:
+            error instanceof Error
+              ? `We could not restore this report: ${error.message}`
+              : "We could not restore this report. Please try again.",
+          timestamp: new Date().toLocaleTimeString([], {
+            hour: "2-digit",
+            minute: "2-digit",
+          }),
         },
       ])
     }
@@ -251,15 +692,30 @@ export default function App() {
   const handleCaseSubmitted = async (caseRec: CaseRecord) => {
     setSubmittedCase(caseRec)
     setUserCases((prev) => [caseRec, ...prev])
-    go("success")
+    if (sessionUser?.id) {
+      window.localStorage.removeItem(activeCaseStorageKey(sessionUser.id))
+      window.localStorage.setItem(
+        lastReportStorageKey(sessionUser.id),
+        caseRec.id,
+      )
+    }
+    try {
+      window.sessionStorage.removeItem(lastScreenStorageKey)
+    } catch {
+      // Ignore storage failures.
+    }
+    // Send the user straight to the saved bilingual summary and awareness-post
+    // screen instead of stopping on a dead-end success card.
+    go("report-summary")
   }
 
   const showTabBar = ["home", "my-cases", "defend", "profile"].includes(screen)
 
   return (
     <div
+      className="app-canvas"
       style={{
-        minHeight: "100vh",
+        minHeight: "100dvh",
         background: "#132323",
         display: "flex",
         alignItems: "center",
@@ -269,9 +725,12 @@ export default function App() {
     >
       {/* Mobile viewport frame */}
       <div
+        className="app-device"
         style={{
           width: 390,
-          height: 844,
+          height: "min(844px, 100dvh)",
+          maxHeight: "100dvh",
+          minHeight: 0,
           background: C.bgCanvas,
           borderRadius: 44,
           overflow: "hidden",
@@ -282,48 +741,21 @@ export default function App() {
           flexDirection: "column",
         }}
       >
-        {/* Top Status Bar */}
-        <div
-          style={{
-            height: 44,
-            background: screen === "agent-chat" ? C.teal900 : C.bgCanvas,
-            display: "flex",
-            alignItems: "center",
-            justifyContent: "space-between",
-            padding: "0 24px",
-            flexShrink: 0,
-            transition: "background 0.2s",
-          }}
-        >
-          <span
-            style={{
-              fontSize: 12,
-              fontWeight: 600,
-              color:
-                screen === "agent-chat"
-                  ? "rgba(255,255,255,0.8)"
-                  : C.textSecondary,
-            }}
-          >
-            9:41
-          </span>
-          <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
-            <span style={{ fontSize: 11 }}>📶</span>
-            <span style={{ fontSize: 11 }}>🔋</span>
-          </div>
-        </div>
 
         {/* Screen Routing */}
         <div
+          className="app-screen-host"
           style={{
             flex: 1,
+            minHeight: 0,
+            minWidth: 0,
             overflow: "hidden",
             position: "relative",
             display: "flex",
             flexDirection: "column",
           }}
         >
-          {screen === "loading" && <LoadingScreen />}
+          {screen === "loading" && <LoadingScreen onStart={() => {}} />}
 
           {screen === "auth" && (
             <RealAuthScreen
@@ -333,13 +765,7 @@ export default function App() {
           )}
 
           {screen === "onboard-profile" && (
-            <ProfileSetupScreen
-              userId={sessionUser?.id}
-              userProfile={userProfile}
-              setUserProfile={setUserProfile}
-              onDone={() => go("home")}
-              language={language}
-            />
+            <QuickOnboardScreen onDone={() => go("home")} language={language} />
           )}
 
           {screen === "home" && (
@@ -378,9 +804,7 @@ export default function App() {
               onContinueChat={() => go("agent-chat")}
               onSubmit={async () => {
                 if (!sessionUser?.id) {
-                  window.alert(
-                    "Please sign in to save this report.",
-                  )
+                  window.alert("Please sign in to save this report.")
                   return
                 }
                 if (!sathiCaseId) {
@@ -393,9 +817,57 @@ export default function App() {
                   extractedData,
                   userProfile,
                 )
+                try {
+                  await confirmAndCompileCase(sathiCaseId)
+                } catch (error) {
+                  console.warn(
+                    "Could not confirm or compile the case report; the saved draft is still available:",
+                    error,
+                  )
+                }
                 await handleCaseSubmitted(caseRecord)
               }}
               onBack={() => go("agent-chat")}
+            />
+          )}
+
+          {screen === "report-summary" &&
+            (submittedCase ? (
+              <ReportSummaryScreen
+                caseRecord={submittedCase}
+                preferredLanguage={language}
+                onViewCase={() => {
+                  setActiveCase(submittedCase)
+                  go("case-status")
+                }}
+                onHome={() => {
+                  setActiveTab("home")
+                  go("home")
+                }}
+                onFileCase={() => {
+                  setActiveCase(submittedCase)
+                  go("filing-preview")
+                }}
+              />
+            ) : (
+              <SuccessScreen
+                caseRecord={submittedCase}
+                onTrack={() => go("my-cases")}
+                onHome={() => {
+                  setActiveTab("home")
+                  go("home")
+                }}
+              />
+            ))}
+
+          {screen === "filing-preview" && activeCase && (
+            <FilingPreviewScreen
+              caseRecord={activeCase}
+              onBack={() => go("report-summary")}
+              onHome={() => {
+                setActiveTab("home")
+                go("home")
+              }}
             />
           )}
 
@@ -425,6 +897,7 @@ export default function App() {
                 setActiveCase(c)
                 go("case-status")
               }}
+              onContinueCase={(c) => void continueReport(c)}
               onNewReport={() => startNewReport()}
             />
           )}
@@ -433,21 +906,21 @@ export default function App() {
             <CaseStatusScreen
               caseRecord={activeCase}
               onBack={() => switchTab("my-cases")}
+              onContinue={(c) => void continueReport(c)}
+              onSummary={(c) => {
+                setSubmittedCase(c)
+                go("report-summary")
+              }}
             />
           )}
 
           {screen === "defend" && (
-            <DefendScreen
-              onStartReport={() => startNewReport()}
-            />
+            <DefendScreen onStartReport={() => startNewReport()} />
           )}
 
           {screen === "profile" && (
             <ProfileScreen
-              userProfile={userProfile}
-              setUserProfile={setUserProfile}
               language={language}
-              setLanguage={setLanguage}
               onLogout={async () => {
                 await supabase.auth.signOut()
                 setSessionUser(null)
@@ -461,7 +934,6 @@ export default function App() {
                 setUserCases([])
                 go("auth")
               }}
-              userId={sessionUser?.id}
             />
           )}
         </div>
@@ -473,6 +945,7 @@ export default function App() {
         <div
           style={{
             height: 24,
+            flexShrink: 0,
             background: showTabBar
               ? C.white
               : screen === "agent-chat"
@@ -494,40 +967,6 @@ export default function App() {
           />
         </div>
       </div>
-
-    </div>
-  )
-}
-
-// ─── Loading State ────────────────────────────────────────────────────────────
-
-function LoadingScreen() {
-  return (
-    <div
-      style={{
-        flex: 1,
-        background: C.teal900,
-        display: "flex",
-        flexDirection: "column",
-        alignItems: "center",
-        justifyContent: "center",
-      }}
-    >
-      <div style={{ fontSize: 44, marginBottom: 12 }}>🛡️</div>
-      <h2
-        style={{
-          color: C.white,
-          fontFamily: "'Poppins', sans-serif",
-          fontSize: 24,
-          fontWeight: 700,
-          margin: "0 0 6px",
-        }}
-      >
-        CyberSathi
-      </h2>
-      <p style={{ color: C.mint300, fontSize: 13, letterSpacing: "0.1em" }}>
-        CONNECTING TO SECURE SERVICES...
-      </p>
     </div>
   )
 }
@@ -735,7 +1174,7 @@ function RealAuthScreen({
           {mode === "signup" && (
             <>
               <div>
-                <label style={labelStyle} htmlFor="auth-name">
+                <label className="cy-label" style={labelStyle} htmlFor="auth-name">
                   Full Name (Legal Name)
                 </label>
                 <input
@@ -746,12 +1185,12 @@ function RealAuthScreen({
                   value={name}
                   onChange={(e) => setName(e.target.value)}
                   placeholder="e.g. Ramesh Sharma"
-                  style={inputStyle}
+                  className="cy-input" style={inputStyle}
                 />
               </div>
 
               <div>
-                <label style={labelStyle} htmlFor="auth-phone">
+                <label className="cy-label" style={labelStyle} htmlFor="auth-phone">
                   Mobile Number
                 </label>
                 <div
@@ -790,7 +1229,7 @@ function RealAuthScreen({
           )}
 
           <div>
-            <label style={labelStyle} htmlFor="auth-email">
+            <label className="cy-label" style={labelStyle} htmlFor="auth-email">
               Official Email Address
             </label>
             <input
@@ -801,12 +1240,12 @@ function RealAuthScreen({
               value={email}
               onChange={(e) => setEmail(e.target.value)}
               placeholder="e.g. citizen@example.com"
-              style={inputStyle}
+              className="cy-input" style={inputStyle}
             />
           </div>
 
           <div>
-            <label style={labelStyle} htmlFor="auth-password">
+            <label className="cy-label" style={labelStyle} htmlFor="auth-password">
               Password
             </label>
             <input
@@ -819,7 +1258,7 @@ function RealAuthScreen({
               value={password}
               onChange={(e) => setPassword(e.target.value)}
               placeholder="Minimum 6 characters"
-              style={inputStyle}
+              className="cy-input" style={inputStyle}
             />
           </div>
 
@@ -926,197 +1365,6 @@ function RealAuthScreen({
   )
 }
 
-// ─── Profile Setup ────────────────────────────────────────────────────────────
-
-function ProfileSetupScreen({
-  userId,
-  userProfile,
-  setUserProfile,
-  onDone,
-  language,
-}: {
-  userId?: string
-  userProfile: any
-  setUserProfile: any
-  onDone: () => void
-  language: string
-}) {
-  const [name, setName] = useState(userProfile.displayName || "")
-  const [phone, setPhone] = useState(
-    userProfile.phone.replace("+91 ", "") || "",
-  )
-  const [stateDistrict, setStateDistrict] = useState(
-    userProfile.stateDistrict || "",
-  )
-  const [busy, setBusy] = useState(false)
-  const [error, setError] = useState("")
-
-  const handleSave = async () => {
-    if (name.trim().length < 2) {
-      setError("Please enter your legal name for the report.")
-      return
-    }
-
-    setBusy(true)
-    setError("")
-
-    try {
-      const cleanPhone = phone.trim()
-        ? phone.startsWith("+91")
-          ? phone.trim()
-          : `+91 ${phone.replace(/\D/g, "")}`
-        : ""
-      const updated = {
-        displayName: name.trim(),
-        phone: cleanPhone,
-        email: userProfile.email,
-        stateDistrict: stateDistrict.trim(),
-        language,
-      }
-
-      setUserProfile(updated)
-
-      if (userId) {
-        await updateProfile(userId, { full_name: name.trim() })
-      }
-
-      await supabase.auth.updateUser({
-        data: {
-          full_name: name.trim(),
-          displayName: name.trim(),
-          phone_e164: cleanPhone,
-          state_district: stateDistrict.trim(),
-        },
-      })
-
-      onDone()
-    } catch (err: any) {
-      setError(err?.message || "Could not update profile.")
-    } finally {
-      setBusy(false)
-    }
-  }
-
-  return (
-    <div
-      style={{
-        flex: 1,
-        background: C.white,
-        display: "flex",
-        flexDirection: "column",
-        padding: "28px 20px",
-      }}
-    >
-      <div style={{ textAlign: "center", marginBottom: 24 }}>
-        <div
-          style={{
-            width: 64,
-            height: 64,
-            borderRadius: "50%",
-            background: C.mint100,
-            display: "inline-flex",
-            alignItems: "center",
-            justifyContent: "center",
-            fontSize: 32,
-            marginBottom: 8,
-          }}
-        >
-          👤
-        </div>
-        <h2
-          style={{
-            margin: "0 0 6px",
-            fontSize: 20,
-            fontWeight: 700,
-            color: C.textPrimary,
-            fontFamily: "'Poppins', sans-serif",
-          }}
-        >
-          Complainant Profile
-        </h2>
-        <p style={{ margin: 0, fontSize: 13, color: C.textSecondary }}>
-          Used to prepare your report and identify the relevant jurisdiction
-        </p>
-      </div>
-
-      <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
-        <div>
-          <label style={labelStyle} htmlFor="setup-name">
-            Legal Full Name
-          </label>
-          <input
-            id="setup-name"
-            type="text"
-            value={name}
-            onChange={(e) => setName(e.target.value)}
-            placeholder="As per Aadhaar / PAN"
-            style={inputStyle}
-          />
-        </div>
-
-        <div>
-          <label style={labelStyle} htmlFor="setup-phone">
-            Contact Mobile Number
-          </label>
-          <div
-            style={{
-              display: "flex",
-              alignItems: "center",
-              gap: 8,
-              ...inputStyle,
-            }}
-          >
-            <span style={{ color: C.textSecondary, fontWeight: 600 }}>+91</span>
-            <input
-              id="setup-phone"
-              type="tel"
-              value={phone}
-              onChange={(e) =>
-                setPhone(e.target.value.replace(/\D/g, "").slice(0, 10))
-              }
-              placeholder="10-digit mobile number"
-              style={{
-                border: 0,
-                outline: "none",
-                width: "100%",
-                background: "transparent",
-                font: "inherit",
-                color: C.textPrimary,
-              }}
-            />
-          </div>
-        </div>
-
-        <div>
-          <label style={labelStyle} htmlFor="setup-location">
-            State & District Jurisdiction
-          </label>
-          <input
-            id="setup-location"
-            type="text"
-            value={stateDistrict}
-            onChange={(e) => setStateDistrict(e.target.value)}
-            placeholder="e.g. Maharashtra, Mumbai Suburban"
-            style={inputStyle}
-          />
-        </div>
-
-        {error && (
-          <p style={{ color: C.danger, fontSize: 13, margin: 0 }}>{error}</p>
-        )}
-
-        <div style={{ marginTop: 24 }}>
-          <PrimaryButton
-            label={busy ? "Saving Profile..." : "Save & Continue to Dashboard"}
-            disabled={busy || name.trim().length < 2}
-            onClick={handleSave}
-          />
-        </div>
-      </div>
-    </div>
-  )
-}
-
 // ─── Home Screen ──────────────────────────────────────────────────────────────
 
 function HomeScreen({
@@ -1139,19 +1387,9 @@ function HomeScreen({
     return () => clearInterval(t)
   }, [])
 
-  const handleMicrophone = async () => {
-    setMicBusy(true)
+  const handleMicrophone = () => {
     setMicStatus("")
-    try {
-      const stream = await requestMicrophoneAccess()
-      stream.getTracks().forEach((track) => track.stop())
-      setMicStatus("Microphone access granted. Starting voice intake...")
-      onStartReport(undefined, true)
-    } catch (error) {
-      setMicStatus(getMicrophoneErrorMessage(error))
-    } finally {
-      setMicBusy(false)
-    }
+    void onStartReport(undefined, true)
   }
 
   const topics = [
@@ -1300,27 +1538,27 @@ function HomeScreen({
               opacity: pulse ? 0.2 : 0.45,
               transform: pulse ? "scale(1.12)" : "scale(1)",
               transition: "opacity 1.2s ease, transform 1.2s ease",
+              pointerEvents: "none",
             }}
           />
           <button
+            type="button"
             onClick={handleMicrophone}
-            disabled={micBusy}
             style={{
               width: 92,
               height: 92,
               borderRadius: "50%",
               background: `linear-gradient(135deg, ${C.teal600}, ${C.teal500})`,
               border: "none",
-              cursor: micBusy ? "not-allowed" : "pointer",
+              cursor: "pointer",
               display: "flex",
               alignItems: "center",
               justifyContent: "center",
               fontSize: 36,
               boxShadow: `0 8px 30px ${C.teal600}60`,
-              opacity: micBusy ? 0.7 : 1,
             }}
-            aria-label="Microphone"
-            title="Tap to grant microphone access and start voice intake"
+            aria-label="Start voice intake"
+            title="Tap to start voice intake"
           >
             🎙️
           </button>
@@ -1328,7 +1566,7 @@ function HomeScreen({
         <p
           style={{ fontSize: 13, fontWeight: 600, color: C.teal700, margin: 0 }}
         >
-          {micBusy ? "Requesting microphone..." : "Tap Orb to Start Voice Intake"}
+          Tap Orb to Start Voice Intake
         </p>
         {micStatus && (
           <p
@@ -1478,7 +1716,8 @@ function audioBufferToWav(audio: AudioBuffer): ArrayBuffer {
   const buffer = new ArrayBuffer(44 + samples.length * 2)
   const view = new DataView(buffer)
   const write = (offset: number, value: string) => {
-    for (let i = 0; i < value.length; i++) view.setUint8(offset + i, value.charCodeAt(i))
+    for (let i = 0; i < value.length; i++)
+      view.setUint8(offset + i, value.charCodeAt(i))
   }
   write(0, "RIFF")
   view.setUint32(4, 36 + samples.length * 2, true)
@@ -1531,27 +1770,100 @@ function AgentChatScreen({
 }) {
   const [inputText, setInputText] = useState("")
   const [isListening, setIsListening] = useState(false)
-  const [isBrowserListening, setIsBrowserListening] = useState(false)
   const [micStatus, setMicStatus] = useState("")
   const [loadingReply, setLoadingReply] = useState(false)
   const [showExtractedPanel, setShowExtractedPanel] = useState(false)
-  const messagesEndRef = useRef<HTMLDivElement>(null)
+  const [showLiveVoice, setShowLiveVoice] = useState(Boolean(autoStartMic))
+  const [evidenceStatus, setEvidenceStatus] = useState("")
+  const [evidenceBusy, setEvidenceBusy] = useState(false)
+  const [chatEnded, setChatEnded] = useState(false)
+  const evidenceInputRef = useRef<HTMLInputElement>(null)
+  const messagesContainerRef = useRef<HTMLDivElement>(null)
   const recorderRef = useRef<MediaRecorder | null>(null)
-  const speechRecognitionRef = useRef<any>(null)
   const audioChunksRef = useRef<Blob[]>([])
   const speechAudioRef = useRef<HTMLAudioElement | null>(null)
   const lastSpokenReplyRef = useRef<string | null>(null)
   const autoStartAttemptedRef = useRef(false)
 
-  useEffect(() => {
-    if (autoStartMic && caseId && !isListening && !autoStartAttemptedRef.current) {
-      autoStartAttemptedRef.current = true
-      void toggleMic()
-    }
-  }, [autoStartMic, caseId, isListening])
+  const voiceMsgIds = useRef<Set<string>>(new Set())
+  const blandVoice = useBlandVoiceAgent(
+    caseId,
+    BLAND_AGENT_ID,
+    language,
+    (role, text, turnId) => {
+      const id = turnId || `${role}:${text}`
+      if (voiceMsgIds.current.has(id)) return
+      voiceMsgIds.current.add(id)
+      setMessages((prev) => [
+        ...prev,
+        {
+          id: `voice-${id}`,
+          sender: role === "agent" ? "agent" : "user",
+          text,
+          timestamp: new Date().toLocaleTimeString([], {
+            hour: "2-digit",
+            minute: "2-digit",
+          }),
+        },
+      ])
+      if (caseId) {
+        void saveSathiTranscript(caseId, { role, text }).catch((error) => {
+          console.warn("Could not save voice transcript:", error)
+        })
+      }
+    },
+  )
+  const voiceLive = blandVoice.isStarted || blandVoice.state === "open"
+  const voiceConnecting =
+    blandVoice.isStarting || blandVoice.state === "connecting"
 
   useEffect(() => {
-    messagesEndRef.current?.scrollIntoView({ behavior: "smooth" })
+    if (autoStartMic) setShowLiveVoice(true)
+  }, [autoStartMic])
+
+  // If live voice view is closed, ensure any active connection is stopped.
+  useEffect(() => {
+    if (showLiveVoice) return
+    if (
+      blandVoice.isStarted ||
+      blandVoice.isStarting ||
+      blandVoice.state !== "closed"
+    ) {
+      blandVoice.stop()
+    }
+  }, [
+    showLiveVoice,
+    blandVoice.isStarted,
+    blandVoice.isStarting,
+    blandVoice.state,
+    blandVoice.stop,
+  ])
+
+  useEffect(() => {
+    if (!showLiveVoice || !autoStartMic || autoStartAttemptedRef.current) return
+    if (!caseId) return
+    if (blandVoice.isStarted || blandVoice.isStarting) return
+    autoStartAttemptedRef.current = true
+    void blandVoice.start()
+  }, [
+    showLiveVoice,
+    autoStartMic,
+    caseId,
+    blandVoice.isStarted,
+    blandVoice.isStarting,
+    blandVoice.start,
+  ])
+
+  useEffect(() => {
+    const container = messagesContainerRef.current
+    if (container) {
+      container.scrollTo({
+        top: container.scrollHeight,
+        behavior: window.matchMedia("(prefers-reduced-motion: reduce)").matches
+          ? "auto"
+          : "smooth",
+      })
+    }
   }, [messages, loadingReply])
 
   useEffect(
@@ -1563,24 +1875,9 @@ function AgentChatScreen({
     [],
   )
 
-  const speakReply = async (text: string) => {
-    if (!caseId) return
-    try {
-      const wav = await generateSathiSpeech(caseId, text, language)
-      const url = URL.createObjectURL(wav)
-      const player = new Audio(url)
-      speechAudioRef.current?.pause()
-      speechAudioRef.current = player
-      player.onended = () => URL.revokeObjectURL(url)
-      await player.play()
-    } catch {
-      if ("speechSynthesis" in window) {
-        window.speechSynthesis.cancel()
-        const utterance = new SpeechSynthesisUtterance(text)
-        utterance.lang = language === "hi" ? "hi-IN" : language === "bn" ? "bn-IN" : "en-IN"
-        window.speechSynthesis.speak(utterance)
-      }
-    }
+  const speakReply = async (_text: string) => {
+    // Browser speech synthesis disabled.
+    return
   }
 
   useEffect(() => {
@@ -1602,28 +1899,53 @@ function AgentChatScreen({
       id: `msg-${Date.now()}`,
       sender: "user",
       text: text || "🎙️ Voice message",
-      timestamp: new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }),
+      timestamp: new Date().toLocaleTimeString([], {
+        hour: "2-digit",
+        minute: "2-digit",
+      }),
     }
     setMessages((prev) => [...prev, userMsg])
     setLoadingReply(true)
     try {
-      const response: SathiResponse = await sendSathiTurn(caseId, { language, text, audio: input.audio })
+      const response: SathiResponse = await sendSathiTurn(caseId, {
+        language,
+        text,
+        audio: input.audio,
+      })
       setExtractedData((current) =>
         mergeSathiFactsIntoReport(current, response.facts, previousFacts),
       )
       setPreviousFacts(response.facts)
       if (response.reply) {
-        setMessages((prev) => [...prev, {
-          id: `agent-${Date.now()}`, sender: "agent", text: response.reply!,
-          timestamp: new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }),
-        }])
+        setMessages((prev) => [
+          ...prev,
+          {
+            id: `agent-${Date.now()}`,
+            sender: "agent",
+            text: response.reply!,
+            timestamp: new Date().toLocaleTimeString([], {
+              hour: "2-digit",
+              minute: "2-digit",
+            }),
+          },
+        ])
       }
     } catch (error) {
-      setMessages((prev) => [...prev, {
-        id: `agent-error-${Date.now()}`, sender: "agent",
-        text: error instanceof Error ? error.message : "Sathi could not process that message. Please try again.",
-        timestamp: new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }),
-      }])
+      setMessages((prev) => [
+        ...prev,
+        {
+          id: `agent-error-${Date.now()}`,
+          sender: "agent",
+          text:
+            error instanceof Error
+              ? error.message
+              : "Sathi could not process that message. Please try again.",
+          timestamp: new Date().toLocaleTimeString([], {
+            hour: "2-digit",
+            minute: "2-digit",
+          }),
+        },
+      ])
     } finally {
       setLoadingReply(false)
     }
@@ -1639,21 +1961,26 @@ function AgentChatScreen({
       setMicStatus("Microphone access requires HTTPS or localhost.")
       return
     }
-    if (!navigator.mediaDevices?.getUserMedia || typeof MediaRecorder === "undefined") {
-      setMicStatus(
-        "Audio recording is unavailable. Try browser speech recognition below.",
-      )
+    if (
+      !navigator.mediaDevices?.getUserMedia ||
+      typeof MediaRecorder === "undefined"
+    ) {
+      setMicStatus("Audio recording is unavailable in this browser.")
       return
     }
     try {
-      setMicStatus("")
+      setMicStatus("Listening… speak now. Tap ⏹ to stop and send.")
       const stream = await requestMicrophoneAccess()
       const recorder = new MediaRecorder(stream)
       recorderRef.current = recorder
       audioChunksRef.current = []
-      recorder.ondataavailable = (event) => { if (event.data.size) audioChunksRef.current.push(event.data) }
+      recorder.ondataavailable = (event) => {
+        if (event.data.size) audioChunksRef.current.push(event.data)
+      }
       recorder.onstop = () => {
-        const recorded = new Blob(audioChunksRef.current, { type: recorder.mimeType || "audio/webm" })
+        const recorded = new Blob(audioChunksRef.current, {
+          type: recorder.mimeType || "audio/webm",
+        })
         stream.getTracks().forEach((track) => track.stop())
         if (!caseId) {
           setMicStatus(
@@ -1664,19 +1991,24 @@ function AgentChatScreen({
           return
         }
         if (recorded.size) void recorded.arrayBuffer().then(async (buffer) => {
-          const AudioContextClass = window.AudioContext || (window as any).webkitAudioContext
-          const context = new AudioContextClass()
-          try {
-            const decoded = await context.decodeAudioData(buffer)
-            void submitTurn({ audio: new Blob([audioBufferToWav(decoded)], { type: "audio/wav" }) })
-          } catch {
-            setMicStatus(
-              "The recording format could not be decoded. Try browser speech recognition below.",
-            )
-          } finally {
-            await context.close()
-          }
-        })
+            const AudioContextClass =
+              window.AudioContext || (window as any).webkitAudioContext
+            const context = new AudioContextClass()
+            try {
+              const decoded = await context.decodeAudioData(buffer)
+              void submitTurn({
+                audio: new Blob([audioBufferToWav(decoded)], {
+                  type: "audio/wav",
+                }),
+              })
+            } catch {
+              setMicStatus(
+                "The recording format could not be decoded. Please try again or type your message.",
+              )
+            } finally {
+              await context.close()
+            }
+          })
       }
       recorder.start()
       setIsListening(true)
@@ -1690,69 +2022,7 @@ function AgentChatScreen({
             : name === "NotReadableError"
               ? "The microphone is busy or unavailable to the browser."
               : `Microphone error (${name}). Check this site's microphone permission and try again.`
-      setMicStatus(`${detail} You can also try browser speech recognition below.`)
-    }
-  }
-
-  const toggleBrowserSpeech = () => {
-    if (isBrowserListening) {
-      speechRecognitionRef.current?.stop()
-      return
-    }
-
-    const SpeechRecognition =
-      (window as any).SpeechRecognition ||
-      (window as any).webkitSpeechRecognition
-    if (!SpeechRecognition) {
-      setMicStatus(
-        "Browser speech recognition is not supported here. Try audio recording or type your message.",
-      )
-      return
-    }
-    if (!window.isSecureContext) {
-      setMicStatus("Microphone access requires HTTPS or localhost.")
-      return
-    }
-
-    const recognition = new SpeechRecognition()
-    recognition.lang =
-      language === "hi" ? "hi-IN" : language === "bn" ? "bn-IN" : "en-IN"
-    recognition.continuous = false
-    recognition.interimResults = true
-    recognition.onresult = (event: any) => {
-      const transcript = Array.from(event.results)
-        .map((result: any) => result[0]?.transcript ?? "")
-        .join("")
-        .trim()
-      if (transcript) setInputText(transcript)
-    }
-    recognition.onerror = (event: { error?: string }) => {
-      setIsBrowserListening(false)
-      const detail =
-        event.error === "not-allowed" || event.error === "service-not-allowed"
-          ? "Allow microphone access for this site in your browser settings."
-          : event.error === "no-speech"
-            ? "No speech was detected. Try again and speak after listening starts."
-            : `Browser speech recognition failed${event.error ? ` (${event.error})` : ""}.`
       setMicStatus(detail)
-    }
-    recognition.onend = () => setIsBrowserListening(false)
-    speechRecognitionRef.current = recognition
-    setMicStatus(
-      caseId
-        ? "Browser speech recognition is listening. Review the transcript before sending it to Sathi."
-        : "Browser speech recognition is listening. A Sathi session is required to send the transcript.",
-    )
-    setIsBrowserListening(true)
-    try {
-      recognition.start()
-    } catch (error) {
-      setIsBrowserListening(false)
-      setMicStatus(
-        error instanceof Error
-          ? `Could not start browser speech recognition: ${error.message}`
-          : "Could not start browser speech recognition.",
-      )
     }
   }
 
@@ -1763,6 +2033,171 @@ function AgentChatScreen({
     void submitTurn({ text })
   }
 
+  const mergeEvidenceEntities = (entities: Record<string, any>) => {
+    setExtractedData((current) => {
+      const next = { ...current }
+      const amount =
+        entities.amount ?? entities.amount_lost ?? entities.total_fraud_amount
+      if (amount != null && amount !== "" && !current.amount) {
+        const s = String(amount)
+        next.amount = s.includes("₹")
+          ? s
+          : `₹${Number(s.replace(/[^0-9.]/g, "")) || s}`
+      }
+      const phone =
+        entities.suspect_phone ??
+        entities.suspectPhone ??
+        entities.mobile_number ??
+        entities.caller_number ??
+        entities.phoneNumbers?.[0]
+      if (phone && !current.suspectPhone) next.suspectPhone = String(phone)
+      const upi =
+        entities.upi_id ??
+        entities.upiId ??
+        entities.suspect_upi ??
+        entities.upiIds?.[0]
+      if (upi && !current.suspectUpi) next.suspectUpi = String(upi)
+      const url = entities.url ?? entities.urls?.[0]
+      if (url && !current.suspectDetails) next.suspectDetails = String(url)
+      const platform =
+        entities.bank_or_app ??
+        entities.platform ??
+        entities.upi_app_used ??
+        entities.mode_of_transfer
+      if (platform && !current.platform) next.platform = String(platform)
+      const when =
+        entities.incident_datetime ??
+        entities.date ??
+        entities.incidentDate ??
+        entities.date_of_incident
+      if (when && !current.incidentDate) next.incidentDate = String(when)
+      const cat =
+        entities.provisional_fraud_category ??
+        entities.fraud_type ??
+        entities.category
+      if (cat && !current.category) next.category = String(cat)
+      const desc =
+        entities.description ??
+        entities.narrative ??
+        entities.short_description ??
+        entities.summary
+      if (desc && !current.summary) next.summary = String(desc).slice(0, 2000)
+      if (desc && !current.complaintNarrative)
+        next.complaintNarrative = String(desc).slice(0, 4000)
+      return next
+    })
+  }
+
+  const getMissingVitalFields = (d: ExtractedCaseData) => {
+    const missing: string[] = []
+    if (!d.category?.trim()) missing.push("fraud category")
+    if (!d.incidentDate?.trim()) missing.push("incident date/time")
+    if (!d.amount?.trim()) missing.push("amount lost (if any)")
+    if (!d.summary?.trim() && !d.complaintNarrative?.trim())
+      missing.push("incident description")
+    if (
+      !d.suspectPhone?.trim() &&
+      !d.suspectUpi?.trim() &&
+      !d.suspectDetails?.trim() &&
+      !d.platform?.trim()
+    )
+      missing.push("suspect/platform details (phone, UPI, link, or app)")
+    return missing
+  }
+
+  const uploadEvidence = async (files: FileList | null) => {
+    if (!caseId || !files?.length || evidenceBusy) return
+    setEvidenceBusy(true)
+    try {
+      for (const file of Array.from(files)) {
+        setEvidenceStatus(`Uploading ${file.name} and reading it with AI…`)
+        setMessages((prev) => [
+          ...prev,
+          {
+            id: `ev-up-${Date.now()}-${Math.random().toString(36).slice(2)}`,
+            sender: "user",
+            text: `📎 Uploaded evidence: ${file.name}`,
+            timestamp: new Date().toLocaleTimeString([], {
+              hour: "2-digit",
+              minute: "2-digit",
+            }),
+          },
+        ])
+        void saveSathiTranscript(caseId, {
+          role: "user",
+          text: `📎 Uploaded evidence: ${file.name}`,
+        }).catch((error) =>
+          console.warn("Could not save evidence transcript:", error),
+        )
+        const item = await uploadCaseEvidence(caseId, file)
+        if (item.processingStatus === "failed") {
+          const reason =
+            item.extractionError || "No details could be extracted."
+          setEvidenceStatus(
+            `Evidence uploaded, but extraction failed: ${reason}`,
+          )
+          setMessages((prev) => [
+            ...prev,
+            {
+              id: `ev-failed-${Date.now()}-${Math.random().toString(36).slice(2)}`,
+              sender: "agent",
+              text: `I saved "${file.name}", but could not read its details yet. ${reason} You can retry the upload or type the amount, date, and payment reference.`,
+              timestamp: new Date().toLocaleTimeString([], {
+                hour: "2-digit",
+                minute: "2-digit",
+              }),
+            },
+          ])
+          continue
+        }
+        const entities = (item.extractedEntities || {}) as Record<string, any>
+        if (Object.keys(entities).length) mergeEvidenceEntities(entities)
+        const summary = summarizeExtractedEvidence(entities)
+        const evidenceReply = summary
+          ? `I read "${file.name}" and found:\n${summary}\n\nPlease confirm these details or correct anything that is wrong. I'll then ask only for what is still missing.`
+          : `I received "${file.name}" but could not extract structured fields. Please describe the key details (amount, date, suspect number/UPI/link, what happened).`
+        setMessages((prev) => [
+          ...prev,
+          {
+            id: `ev-ai-${Date.now()}-${Math.random().toString(36).slice(2)}`,
+            sender: "agent",
+            text: evidenceReply,
+            timestamp: new Date().toLocaleTimeString([], {
+              hour: "2-digit",
+              minute: "2-digit",
+            }),
+          },
+        ])
+        void saveSathiTranscript(caseId, {
+          role: "agent",
+          text: evidenceReply,
+        }).catch((error) =>
+          console.warn("Could not save evidence transcript:", error),
+        )
+      }
+      setEvidenceStatus("Evidence processed. Please verify extracted details.")
+    } catch (e) {
+      const msg =
+        e instanceof Error ? e.message : "Evidence upload/processing failed."
+      setEvidenceStatus(msg)
+      setMessages((prev) => [
+        ...prev,
+        {
+          id: `ev-err-${Date.now()}`,
+          sender: "agent",
+          text: `Could not process evidence: ${msg}`,
+          timestamp: new Date().toLocaleTimeString([], {
+            hour: "2-digit",
+            minute: "2-digit",
+          }),
+        },
+      ])
+    } finally {
+      setEvidenceBusy(false)
+      if (evidenceInputRef.current) evidenceInputRef.current.value = ""
+    }
+  }
+
   const hasAnyData = Boolean(
     Boolean(extractedData.amount) ||
       extractedData.suspectPhone ||
@@ -1770,10 +2205,58 @@ function AgentChatScreen({
       messages.length > 2,
   )
 
+  const missingVital = getMissingVitalFields(extractedData)
+  const intakeFinalized = Boolean(
+    extractedData.isComplete || previousFacts?.intakeComplete,
+  )
+  const canReview =
+    hasAnyData &&
+    !evidenceBusy &&
+    !loadingReply &&
+    missingVital.length === 0 &&
+    (chatEnded || intakeFinalized)
+
+  if (showLiveVoice) {
+    const voiceStatus = voiceLive
+      ? "Live voice conversation"
+      : voiceConnecting
+        ? "Connecting to Saathi…"
+        : blandVoice.error
+          ? "Voice connection unavailable"
+          : !caseId
+            ? "Preparing secure session…"
+            : "Ready to start voice"
+    return (
+      <LiveVoiceScreen
+        status={voiceStatus}
+        error={blandVoice.error}
+        language={language}
+        canStart={Boolean(caseId)}
+        isConnected={voiceLive}
+        isAgentSpeaking={blandVoice.isAgentSpeaking}
+        onOpenChat={() => {
+          if (!voiceLive) setShowLiveVoice(false)
+        }}
+        onEnd={() => {
+          blandVoice.stop()
+          setShowLiveVoice(false)
+          autoStartAttemptedRef.current = false
+          setChatEnded(true)
+        }}
+        onStart={() => void blandVoice.start()}
+        voiceMode={blandVoice.voiceMode}
+      />
+    )
+  }
+
   return (
     <div
+      className="chat-screen"
       style={{
         flex: 1,
+        minHeight: 0,
+        minWidth: 0,
+        overflow: "hidden",
         display: "flex",
         flexDirection: "column",
         background: C.bgCanvas,
@@ -1784,6 +2267,9 @@ function AgentChatScreen({
         style={{
           background: C.teal900,
           padding: "12px 18px",
+          flexShrink: 0,
+          position: "relative",
+          zIndex: 2,
           display: "flex",
           alignItems: "center",
           justifyContent: "space-between",
@@ -1831,6 +2317,24 @@ function AgentChatScreen({
 
         <div style={{ display: "flex", gap: 8 }}>
           <button
+            type="button"
+            onClick={() => setShowLiveVoice(true)}
+            style={{
+              background: voiceLive
+                ? "rgba(34,197,94,.22)"
+                : "rgba(255,255,255,0.15)",
+              border: voiceLive ? "1px solid rgba(34,197,94,.5)" : "none",
+              borderRadius: 8,
+              padding: "6px 10px",
+              color: voiceLive ? "#bbf7d0" : C.mint300,
+              fontSize: 11,
+              fontWeight: 700,
+              cursor: "pointer",
+            }}
+          >
+            {voiceLive ? "● Live" : voiceConnecting ? "… Voice" : "🎙 Voice"}
+          </button>
+          <button
             onClick={() => setShowExtractedPanel((p) => !p)}
             style={{
               background: "rgba(255,255,255,0.15)",
@@ -1845,7 +2349,6 @@ function AgentChatScreen({
           >
             📋 Facts {hasAnyData ? "✓" : ""}
           </button>
-
         </div>
       </div>
 
@@ -1856,6 +2359,9 @@ function AgentChatScreen({
             background: C.mint100,
             padding: "12px 16px",
             borderBottom: `1px solid ${C.divider}`,
+            maxHeight: "32%",
+            overflowY: "auto",
+            flexShrink: 0,
             animation: "fadeIn 0.2s",
           }}
         >
@@ -1916,9 +2422,17 @@ function AgentChatScreen({
 
       {/* Chat Messages Container */}
       <div
+        ref={messagesContainerRef}
+        role="log"
+        aria-label="Conversation messages"
+        aria-live="polite"
         style={{
           flex: 1,
+          minHeight: 0,
+          minWidth: 0,
           overflowY: "auto",
+          overscrollBehavior: "contain",
+          WebkitOverflowScrolling: "touch",
           padding: "16px 16px",
           display: "flex",
           flexDirection: "column",
@@ -1997,13 +2511,56 @@ function AgentChatScreen({
           </div>
         )}
 
-        <div ref={messagesEndRef} />
       </div>
 
-      {/* Keep the intake open for corrections and extra details before review. */}
-      {hasAnyData && (
+      {hasAnyData && !canReview && (
         <div
           style={{
+            flexShrink: 0,
+            padding: "8px 16px",
+            background: C.white,
+            borderTop: `1px solid ${C.divider}`,
+          }}
+        >
+          <p
+            style={{
+              margin: "0 0 8px",
+              fontSize: 11,
+              color: C.textSecondary,
+              lineHeight: 1.45,
+            }}
+          >
+            {evidenceBusy
+              ? "Processing evidence… review will be available when extraction is complete."
+              : missingVital.length
+                ? `Missing vital fields: ${missingVital.join(", ")}. Please provide them in chat or upload evidence.`
+                : "When all details are collected and verified, end the chat to review and edit your report."}
+          </p>
+          {!evidenceBusy && !loadingReply && missingVital.length === 0 && (
+            <button
+              type="button"
+              onClick={() => setChatEnded(true)}
+              style={{
+                width: "100%",
+                padding: "10px",
+                borderRadius: 20,
+                border: `1px solid ${C.teal600}`,
+                background: C.white,
+                color: C.teal700,
+                fontWeight: 700,
+                fontSize: 13,
+                cursor: "pointer",
+              }}
+            >
+              End chat & prepare review
+            </button>
+          )}
+        </div>
+      )}
+      {canReview && (
+        <div
+          style={{
+            flexShrink: 0,
             padding: "8px 16px",
             background: C.white,
             borderTop: `1px solid ${C.divider}`,
@@ -2017,7 +2574,7 @@ function AgentChatScreen({
               color: C.textSecondary,
             }}
           >
-            Add corrections or missing details in the chat above before reviewing.
+            All vital details collected. Review, edit, and confirm your report.
           </p>
           <button
             onClick={onProceedToReview}
@@ -2050,15 +2607,51 @@ function AgentChatScreen({
           padding: "10px 16px 14px",
           background: C.white,
           borderTop: `1px solid ${C.divider}`,
+          flexShrink: 0,
           display: "flex",
           alignItems: "center",
           gap: 8,
         }}
       >
+        <input
+          ref={evidenceInputRef}
+          type="file"
+          accept="image/*,application/pdf,.pdf"
+          multiple
+          style={{ display: "none" }}
+          onChange={(e) => void uploadEvidence(e.target.files)}
+        />
+        <button
+          type="button"
+          onClick={() => evidenceInputRef.current?.click()}
+          disabled={!caseId || loadingReply || evidenceBusy}
+          aria-label="Upload evidence"
+          title="Upload evidence (screenshot/document)"
+          style={{
+            width: 44,
+            height: 44,
+            borderRadius: "50%",
+            border: `1px solid ${C.divider}`,
+            background: C.white,
+            color:
+              !caseId || loadingReply || evidenceBusy
+                ? C.textSecondary
+                : C.teal700,
+            fontSize: 16,
+            cursor:
+              !caseId || loadingReply || evidenceBusy
+                ? "not-allowed"
+                : "pointer",
+            flexShrink: 0,
+          }}
+        >
+          📎
+        </button>
         <button
           type="button"
           onClick={toggleMic}
-          disabled={loadingReply}
+          disabled={loadingReply || evidenceBusy}
+          aria-label={isListening ? "Stop recording" : "Record voice message"}
           style={{
             width: 44,
             height: 44,
@@ -2081,6 +2674,7 @@ function AgentChatScreen({
 
         <input
           type="text"
+          aria-label="Type or dictate incident details"
           value={inputText}
           disabled={loadingReply}
           onChange={(e) => setInputText(e.target.value)}
@@ -2092,11 +2686,12 @@ function AgentChatScreen({
           }}
           placeholder={
             isListening
-                ? "Listening... speak now"
-                : "Type or dictate incident details..."
+              ? "Listening... speak now"
+              : "Type or dictate incident details..."
           }
           style={{
             flex: 1,
+            minWidth: 0,
             padding: "12px 16px",
             borderRadius: 24,
             border: `1.5px solid ${isListening ? C.danger : C.divider}`,
@@ -2111,18 +2706,25 @@ function AgentChatScreen({
           type="button"
           onClick={() => void handleSend()}
           disabled={!caseId || !inputText.trim() || loadingReply}
+          aria-label="Send message"
           style={{
             width: 44,
             height: 44,
             borderRadius: "50%",
             border: "none",
             background:
-              !caseId || !inputText.trim() || loadingReply ? C.divider : C.teal600,
+              !caseId || !inputText.trim() || loadingReply
+                ? C.divider
+                : C.teal600,
             color:
-              !caseId || !inputText.trim() || loadingReply ? C.textSecondary : C.white,
+              !caseId || !inputText.trim() || loadingReply
+                ? C.textSecondary
+                : C.white,
             fontSize: 18,
             cursor:
-              !caseId || !inputText.trim() || loadingReply ? "not-allowed" : "pointer",
+              !caseId || !inputText.trim() || loadingReply
+                ? "not-allowed"
+                : "pointer",
             flexShrink: 0,
             display: "flex",
             alignItems: "center",
@@ -2137,30 +2739,12 @@ function AgentChatScreen({
         style={{
           padding: "0 16px 6px",
           background: C.white,
+          flexShrink: 0,
           display: "flex",
           alignItems: "center",
           gap: 8,
         }}
       >
-        <button
-          type="button"
-          onClick={toggleBrowserSpeech}
-          disabled={loadingReply}
-          style={{
-            border: 0,
-            padding: "4px 0",
-            background: "transparent",
-            color: C.teal700,
-            fontSize: 11,
-            fontWeight: 700,
-            textDecoration: "underline",
-            cursor: loadingReply ? "not-allowed" : "pointer",
-          }}
-        >
-          {isBrowserListening
-            ? "Stop browser speech recognition"
-            : "Try browser speech recognition"}
-        </button>
         {!caseId && (
           <span style={{ fontSize: 10, color: C.danger }}>
             Sathi session unavailable
@@ -2172,6 +2756,7 @@ function AgentChatScreen({
           role="status"
           style={{
             margin: 0,
+            flexShrink: 0,
             padding: "2px 16px 8px",
             background: C.white,
             color: C.textSecondary,
@@ -2182,8 +2767,17 @@ function AgentChatScreen({
           {micStatus}
         </p>
       )}
-      <p style={{ margin: "-4px 16px 8px", fontSize: 10, color: C.textSecondary, background: C.white }}>
-        Browser speech recognition creates a transcript in this browser session. Review it before sending. Recorded audio is sent to Sathi when a session is available.
+      <p
+        style={{
+          margin: "-4px 16px 8px",
+          flexShrink: 0,
+          fontSize: 10,
+          color: C.textSecondary,
+          background: C.white,
+        }}
+      >
+        Browser speech features are disabled. Use 🎙️ to record audio for Sathi or
+        type your message.
       </p>
 
       <style>{`
@@ -2192,6 +2786,310 @@ function AgentChatScreen({
         @keyframes fadeIn { from{opacity:0;transform:translateY(-8px)} to{opacity:1;transform:translateY(0)} }
       `}</style>
     </div>
+  )
+}
+
+function LiveVoiceScreen({
+  status,
+  error,
+  language,
+  canStart = true,
+  isConnected = false,
+  isAgentSpeaking = false,
+  onOpenChat,
+  onEnd,
+  onStart,
+  voiceMode = "primary",
+}: {
+  status: string
+  error: string
+  language: "en" | "hi" | "bn"
+  canStart?: boolean
+  isConnected?: boolean
+  isAgentSpeaking?: boolean
+  onOpenChat: () => void
+  onEnd: () => void
+  onStart: () => void
+  voiceMode?: "primary" | "fallback"
+}) {
+  const active = status === "Live voice conversation"
+  const connecting = status === "Connecting to Saathi…"
+  const preparing = status === "Preparing secure session…"
+  const langLabel =
+    language === "hi" ? "Hindi" : language === "bn" ? "Bengali" : "English"
+  const isFallback = voiceMode === "fallback"
+  const showBreathing = active || connecting || preparing
+  return (
+    <>
+      {isFallback && (
+        <div
+          style={{
+            position: "fixed",
+            top: 0,
+            left: 0,
+            right: 0,
+            zIndex: 100,
+            background: "#FEF3C7",
+            borderBottom: `1px solid ${C.warningIcon}`,
+            padding: "8px 16px",
+            textAlign: "center",
+            fontSize: 11,
+            fontWeight: 600,
+            color: "#92400E",
+            animation: "slideDown 0.3s ease-out",
+          }}
+        >
+          ⚠️ Fallback voice active — quality may vary
+        </div>
+      )}
+      <div
+        style={{
+          flex: 1,
+          display: "flex",
+          flexDirection: "column",
+          alignItems: "center",
+          justifyContent: "space-between",
+          padding: "28px 22px 24px",
+          background: C.teal900,
+          color: C.white,
+          textAlign: "center",
+        }}
+      >
+      <div
+        style={{
+          width: "100%",
+          display: "flex",
+          justifyContent: "space-between",
+          alignItems: "center",
+        }}
+      >
+        <div style={{ textAlign: "left" }}>
+          <strong style={{ fontSize: 15 }}>Cyber Sathi</strong>
+          <p
+            style={{
+              margin: "3px 0 0",
+              fontSize: 11,
+              color: "rgba(255,255,255,.65)",
+            }}
+          >
+            {status}
+          </p>
+        </div>
+        <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+          {active && (
+            <span
+              style={{
+                fontSize: 10,
+                fontWeight: 700,
+                color: C.mint300,
+                letterSpacing: "0.06em",
+              }}
+            >
+              LIVE
+            </span>
+          )}
+          <span
+            style={{
+              width: 10,
+              height: 10,
+              borderRadius: "50%",
+              background: active
+                ? "#22c55e"
+                : connecting || preparing
+                  ? C.warningIcon
+                  : error
+                    ? C.danger
+                    : "rgba(255,255,255,.35)",
+              boxShadow: active
+                ? "0 0 0 6px rgba(34,197,94,.25)"
+                : connecting || preparing
+                  ? "0 0 0 6px rgba(240,169,58,.2)"
+                  : "none",
+              animation:
+                connecting || preparing ? "pulse-dot 1s infinite" : "none",
+            }}
+          />
+        </div>
+      </div>
+      <div
+        style={{
+          display: "flex",
+          flexDirection: "column",
+          alignItems: "center",
+          gap: 18,
+        }}
+      >
+        <div className={showBreathing ? "voice-orb live" : "voice-orb"}>
+          <div className="voice-orb-core">🎙️</div>
+          <i />
+          <i />
+          <i />
+        </div>
+        {isConnected && (
+          <div className={isAgentSpeaking ? "voice-wave active" : "voice-wave"}>
+            <div className="voice-wave-bars" aria-hidden="true">
+              <span />
+              <span />
+              <span />
+              <span />
+              <span />
+              <span />
+              <span />
+              <span />
+              <span />
+              <span />
+              <span />
+              <span />
+            </div>
+            <p
+              style={{
+                margin: "10px 0 0",
+                fontSize: 11,
+                color: "rgba(255,255,255,.75)",
+                fontWeight: 600,
+              }}
+            >
+              {isAgentSpeaking
+                ? "Saathi is speaking…"
+                : "Connected · listening for your voice"}
+            </p>
+          </div>
+        )}
+        <div>
+          <h1 style={{ margin: 0, fontSize: 22 }}>
+            {active
+              ? "Speak naturally"
+              : connecting
+                ? "Connecting…"
+                : preparing
+                  ? "Preparing…"
+                  : error
+                    ? "Voice unavailable"
+                    : "Ready for voice"}
+          </h1>
+          <p
+            style={{
+              margin: "8px 0 0",
+              fontSize: 13,
+              lineHeight: 1.5,
+              color: "rgba(255,255,255,.7)",
+              maxWidth: 290,
+            }}
+          >
+            {active
+              ? `Saathi is connected and listening in ${langLabel}. Speak naturally; you can interrupt anytime.`
+              : connecting
+                ? `Requesting microphone and connecting Saathi in ${langLabel}…`
+                : preparing
+                  ? "Preparing your secure case session. Voice will connect automatically."
+                  : error ||
+                    "Tap Start to connect microphone and begin a live voice conversation with Saathi."}
+          </p>
+        </div>
+      </div>
+      <div style={{ width: "100%", display: "grid", gap: 10 }}>
+        {!active && !connecting && !preparing && (
+          <button
+            type="button"
+            onClick={onStart}
+            disabled={!canStart}
+            style={{
+              border: 0,
+              borderRadius: 24,
+              padding: "13px",
+              fontWeight: 700,
+              cursor: canStart ? "pointer" : "not-allowed",
+              background: canStart ? C.mint300 : "rgba(127,209,192,.35)",
+              color: canStart ? C.teal900 : C.white,
+            }}
+          >
+            {error ? "Try voice again" : "Start Voice"}
+          </button>
+        )}
+        {(connecting || preparing) && (
+          <button
+            type="button"
+            disabled
+            style={{
+              border: 0,
+              borderRadius: 24,
+              padding: "13px",
+              fontWeight: 700,
+              cursor: "wait",
+              background: "rgba(127,209,192,.35)",
+              color: C.white,
+            }}
+          >
+            {preparing ? "Preparing…" : "Connecting…"}
+          </button>
+        )}
+        <button
+          type="button"
+          onClick={onOpenChat}
+          disabled={isConnected}
+          style={{
+            border: `1px solid ${
+              isConnected ? "rgba(255,255,255,.25)" : C.mint300
+            }`,
+            borderRadius: 24,
+            padding: "13px",
+            fontWeight: 700,
+            cursor: isConnected ? "not-allowed" : "pointer",
+            background: "transparent",
+            color: isConnected ? "rgba(255,255,255,.45)" : C.white,
+          }}
+        >
+          {isConnected
+            ? "Voice call active (stay on live screen)"
+            : "Open text chat"}
+        </button>
+        <button
+          type="button"
+          onClick={onEnd}
+          style={{
+            border: 0,
+            background: "transparent",
+            color: "rgba(255,255,255,.72)",
+            padding: 7,
+            cursor: "pointer",
+            fontSize: 12,
+          }}
+        >
+          End voice conversation
+        </button>
+      </div>
+      <style>{`
+        .voice-orb{width:152px;height:152px;display:grid;place-items:center;position:relative}
+        .voice-orb-core{z-index:2;width:84px;height:84px;border-radius:50%;display:grid;place-items:center;background:linear-gradient(135deg,#1d8577,#7fd1c0);font-size:32px;box-shadow:0 0 0 12px rgba(127,209,192,.12)}
+        .voice-orb i{position:absolute;inset:8px;border:1.5px solid rgba(127,209,192,.55);border-radius:50%;opacity:0}
+        .voice-orb i:nth-of-type(2){inset:24px}.voice-orb i:nth-of-type(3){inset:40px}
+        .voice-orb.live .voice-orb-core{animation:core-breathe 2.4s ease-in-out infinite}
+        .voice-orb.live i{animation:voice-breathe 2.4s ease-out infinite}
+        .voice-orb.live i:nth-of-type(2){animation-delay:.6s}.voice-orb.live i:nth-of-type(3){animation-delay:1.2s}
+        .voice-wave{display:flex;flex-direction:column;alignItems:center;justifyContent:center;min-height:44px}
+        .voice-wave-bars{display:flex;alignItems:center;justifyContent:center;gap:5px;height:36px}
+        .voice-wave-bars span{width:4px;height:22px;border-radius:999px;background:rgba(127,209,192,.45);transform-origin:center;animation:wave-breathe 2.4s ease-in-out infinite;opacity:.55}
+        .voice-wave.active .voice-wave-bars span{background:${C.mint300};animation-duration:1.4s;opacity:.9}
+        .voice-wave-bars span:nth-child(1){animation-delay:0s;height:12px}
+        .voice-wave-bars span:nth-child(2){animation-delay:.12s;height:18px}
+        .voice-wave-bars span:nth-child(3){animation-delay:.24s;height:26px}
+        .voice-wave-bars span:nth-child(4){animation-delay:.36s;height:32px}
+        .voice-wave-bars span:nth-child(5){animation-delay:.48s;height:26px}
+        .voice-wave-bars span:nth-child(6){animation-delay:.6s;height:18px}
+        .voice-wave-bars span:nth-child(7){animation-delay:.72s;height:12px}
+        .voice-wave-bars span:nth-child(8){animation-delay:.84s;height:18px}
+        .voice-wave-bars span:nth-child(9){animation-delay:.96s;height:26px}
+        .voice-wave-bars span:nth-child(10){animation-delay:1.08s;height:32px}
+        .voice-wave-bars span:nth-child(11){animation-delay:1.2s;height:20px}
+        .voice-wave-bars span:nth-child(12){animation-delay:1.32s;height:14px}
+        @keyframes wave-breathe{0%,100%{transform:scaleY(.28);opacity:.35}50%{transform:scaleY(1);opacity:1}}
+        @keyframes voice-breathe{0%{transform:scale(.72);opacity:.85}100%{transform:scale(1.18);opacity:0}}
+        @keyframes core-breathe{0%,100%{transform:scale(1)}50%{transform:scale(1.06)}}
+        @keyframes pulse-dot{0%,100%{opacity:1}50%{opacity:.35}}
+        @keyframes slideDown{from{transform:translateY(-100%);opacity:0}to{transform:translateY(0);opacity:1}}
+      `}</style>
+    </div>
+    </>
   )
 }
 
@@ -2216,13 +3114,9 @@ function ReviewReportScreen({
   const [speaking, setSpeaking] = useState(false)
 
   const handleSpeakSummary = () => {
-    if (!window.speechSynthesis) return
-
-    if (speaking) {
-      window.speechSynthesis.cancel()
-      setSpeaking(false)
-      return
-    }
+    // Browser speech synthesis disabled.
+    setSpeaking(false)
+    return
 
     const textToSpeak = `Official incident report. Category: ${extractedData.category}. Amount lost: ${extractedData.amount}. Suspect: ${extractedData.suspectPhone || extractedData.suspectUpi || "Unspecified"}. Statement: ${extractedData.complaintNarrative}`
     const utterance = new SpeechSynthesisUtterance(textToSpeak)
@@ -2231,7 +3125,6 @@ function ReviewReportScreen({
     utterance.onerror = () => setSpeaking(false)
 
     setSpeaking(true)
-    window.speechSynthesis.speak(utterance)
   }
 
   const handleFormSubmit = async () => {
@@ -2414,7 +3307,7 @@ function ReviewReportScreen({
 
           <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
             <div>
-              <label style={labelStyle} htmlFor="rev-category">
+              <label className="cy-label" style={labelStyle} htmlFor="rev-category">
                 Incident Category
               </label>
               <input
@@ -2427,7 +3320,7 @@ function ReviewReportScreen({
                     category: e.target.value,
                   })
                 }
-                style={inputStyle}
+                className="cy-input" style={inputStyle}
               />
             </div>
 
@@ -2439,7 +3332,7 @@ function ReviewReportScreen({
               }}
             >
               <div>
-                <label style={labelStyle} htmlFor="rev-amount">
+                <label className="cy-label" style={labelStyle} htmlFor="rev-amount">
                   Amount Defrauded
                 </label>
                 <input
@@ -2452,12 +3345,12 @@ function ReviewReportScreen({
                       amount: e.target.value,
                     })
                   }
-                  style={{ ...inputStyle, fontWeight: 700, color: C.danger }}
+                  className="cy-input" style={{ ...inputStyle, fontWeight: 700, color: C.danger }}
                 />
               </div>
 
               <div>
-                <label style={labelStyle} htmlFor="rev-date">
+                <label className="cy-label" style={labelStyle} htmlFor="rev-date">
                   Incident Date
                 </label>
                 <input
@@ -2470,13 +3363,13 @@ function ReviewReportScreen({
                       incidentDate: e.target.value,
                     })
                   }
-                  style={inputStyle}
+                  className="cy-input" style={inputStyle}
                 />
               </div>
             </div>
 
             <div>
-              <label style={labelStyle} htmlFor="rev-phone">
+              <label className="cy-label" style={labelStyle} htmlFor="rev-phone">
                 Suspect Phone Number
               </label>
               <input
@@ -2490,12 +3383,12 @@ function ReviewReportScreen({
                     suspectPhone: e.target.value,
                   })
                 }
-                style={inputStyle}
+                className="cy-input" style={inputStyle}
               />
             </div>
 
             <div>
-              <label style={labelStyle} htmlFor="rev-upi">
+              <label className="cy-label" style={labelStyle} htmlFor="rev-upi">
                 Suspect UPI / VPA / Account
               </label>
               <input
@@ -2509,12 +3402,12 @@ function ReviewReportScreen({
                     suspectUpi: e.target.value,
                   })
                 }
-                style={inputStyle}
+                className="cy-input" style={inputStyle}
               />
             </div>
 
             <div>
-              <label style={labelStyle} htmlFor="rev-suspect-details">
+              <label className="cy-label" style={labelStyle} htmlFor="rev-suspect-details">
                 Suspect Website / Other Details
               </label>
               <input
@@ -2528,12 +3421,12 @@ function ReviewReportScreen({
                     suspectDetails: e.target.value,
                   })
                 }
-                style={inputStyle}
+                className="cy-input" style={inputStyle}
               />
             </div>
 
             <div>
-              <label style={labelStyle} htmlFor="rev-platform">
+              <label className="cy-label" style={labelStyle} htmlFor="rev-platform">
                 Platform / Banking App
               </label>
               <input
@@ -2547,12 +3440,12 @@ function ReviewReportScreen({
                     platform: e.target.value,
                   })
                 }
-                style={inputStyle}
+                className="cy-input" style={inputStyle}
               />
             </div>
 
             <div>
-              <label style={labelStyle} htmlFor="rev-summary">
+              <label className="cy-label" style={labelStyle} htmlFor="rev-summary">
                 Report Summary
               </label>
               <textarea
@@ -2565,12 +3458,12 @@ function ReviewReportScreen({
                     summary: e.target.value,
                   })
                 }
-                style={{ ...inputStyle, resize: "vertical", lineHeight: 1.4 }}
+                className="cy-input" style={{ ...inputStyle, resize: "vertical", lineHeight: 1.4 }}
               />
             </div>
 
             <div>
-              <label style={labelStyle} htmlFor="rev-narrative">
+              <label className="cy-label" style={labelStyle} htmlFor="rev-narrative">
                 Formal Incident Narrative for Cyber Cell
               </label>
               <textarea
@@ -2583,12 +3476,12 @@ function ReviewReportScreen({
                     complaintNarrative: e.target.value,
                   })
                 }
-                style={{ ...inputStyle, resize: "vertical", lineHeight: 1.4 }}
+                className="cy-input" style={{ ...inputStyle, resize: "vertical", lineHeight: 1.4 }}
               />
             </div>
 
             <div>
-              <label style={labelStyle} htmlFor="rev-action-requested">
+              <label className="cy-label" style={labelStyle} htmlFor="rev-action-requested">
                 Requested Action
               </label>
               <textarea
@@ -2601,7 +3494,7 @@ function ReviewReportScreen({
                     actionRequested: e.target.value,
                   })
                 }
-                style={{ ...inputStyle, resize: "vertical", lineHeight: 1.4 }}
+                className="cy-input" style={{ ...inputStyle, resize: "vertical", lineHeight: 1.4 }}
               />
             </div>
           </div>
@@ -2647,11 +3540,7 @@ function ReviewReportScreen({
         {/* Submit Button */}
         <div style={{ marginTop: 8 }}>
           <PrimaryButton
-            label={
-              submitting
-                ? "Saving report..."
-                : "Save reviewed report"
-            }
+            label={submitting ? "Saving report..." : "Save reviewed report"}
             disabled={submitting}
             onClick={handleFormSubmit}
           />
@@ -2852,6 +3741,351 @@ function SuccessScreen({
   )
 }
 
+// ─── Filing Preview Screen ────────────────────────────────────────────────────
+
+type FilingPreviewResponse = {
+  previewChecksum: string
+  destinationName: string
+  destinationUrl: string
+  explanation: string
+  submissionData: unknown
+}
+
+function FilingPreviewScreen({
+  caseRecord,
+  onBack,
+  onHome,
+}: {
+  caseRecord: CaseRecord
+  onBack: () => void
+  onHome: () => void
+}) {
+  const [preview, setPreview] = useState<FilingPreviewResponse | null>(null)
+  const [loading, setLoading] = useState(true)
+  const [error, setError] = useState("")
+  const [confirming, setConfirming] = useState(false)
+  const [confirmed, setConfirmed] = useState(false)
+  const [handoff, setHandoff] = useState<any>(null)
+
+  useEffect(() => {
+    let live = true
+    async function loadPreview() {
+      try {
+        const data = await apiRequest<FilingPreviewResponse>(
+          `/cases/${encodeURIComponent(caseRecord.id)}/filing-preview`,
+        )
+        if (live) setPreview(data)
+      } catch (e) {
+        if (live)
+          setError(e instanceof Error ? e.message : "Failed to load preview")
+      } finally {
+        if (live) setLoading(false)
+      }
+    }
+    loadPreview()
+    return () => {
+      live = false
+    }
+  }, [caseRecord.id])
+
+  const handleConfirm = async () => {
+    if (!preview) return
+    setConfirming(true)
+    try {
+      const data = await apiRequest<{ handoff: unknown }>(
+        `/cases/${encodeURIComponent(caseRecord.id)}/confirm-filing`,
+        {
+          method: "POST",
+          body: JSON.stringify({
+            previewChecksum: preview.previewChecksum,
+            acknowledgment: `I_REVIEWED_PREVIEW:${preview.previewChecksum}`,
+          }),
+        },
+      )
+      setHandoff(data.handoff)
+      setConfirmed(true)
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Failed to confirm filing")
+    } finally {
+      setConfirming(false)
+    }
+  }
+
+  if (loading) {
+    return (
+      <div
+        style={{
+          flex: 1,
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "center",
+          background: C.bgCanvas,
+        }}
+      >
+        <div style={{ fontSize: 13, color: C.textSecondary }}>
+          Loading filing preview…
+        </div>
+      </div>
+    )
+  }
+
+  if (error && !preview) {
+    return (
+      <div style={{ flex: 1, padding: 20, background: C.bgCanvas }}>
+        <div
+          style={{
+            background: C.white,
+            borderRadius: 16,
+            padding: 20,
+            border: `1px solid ${C.danger}`,
+          }}
+        >
+          <p style={{ margin: 0, color: C.danger }}>{error}</p>
+          <button
+            onClick={onBack}
+            style={{
+              marginTop: 16,
+              padding: "10px 16px",
+              borderRadius: 20,
+              border: `1px solid ${C.teal600}`,
+              background: C.white,
+              color: C.teal700,
+              fontWeight: 700,
+            }}
+          >
+            Go Back
+          </button>
+        </div>
+      </div>
+    )
+  }
+
+  return (
+    <div
+      style={{
+        flex: 1,
+        overflowY: "auto",
+        padding: "16px 20px 24px",
+        background: C.bgCanvas,
+      }}
+    >
+      <div
+        style={{
+          display: "flex",
+          alignItems: "center",
+          gap: 10,
+          marginBottom: 16,
+        }}
+      >
+        <button
+          onClick={onBack}
+          style={{
+            background: "none",
+            border: "none",
+            fontSize: 20,
+            cursor: "pointer",
+            color: C.teal600,
+          }}
+        >
+          ‹
+        </button>
+        <h2
+          style={{
+            margin: 0,
+            fontSize: 18,
+            fontWeight: 700,
+            color: C.textPrimary,
+          }}
+        >
+          File Case
+        </h2>
+      </div>
+
+      {preview && (
+        <div
+          style={{
+            background: C.white,
+            borderRadius: 16,
+            padding: 16,
+            border: `1px solid ${C.divider}`,
+            marginBottom: 16,
+          }}
+        >
+          <p
+            style={{
+              margin: "0 0 8px",
+              fontSize: 10,
+              fontWeight: 700,
+              color: C.teal700,
+              letterSpacing: "0.08em",
+            }}
+          >
+            FILING DESTINATION
+          </p>
+          <p
+            style={{
+              margin: 0,
+              fontSize: 13,
+              fontWeight: 700,
+              color: C.textPrimary,
+            }}
+          >
+            {preview.destinationName}
+          </p>
+          <p
+            style={{ margin: "8px 0 0", fontSize: 11, color: C.textSecondary }}
+          >
+            {preview.explanation}
+          </p>
+          <a
+            href={preview.destinationUrl}
+            target="_blank"
+            rel="noopener noreferrer"
+            style={{
+              display: "inline-block",
+              marginTop: 8,
+              fontSize: 11,
+              color: C.teal600,
+              textDecoration: "underline",
+            }}
+          >
+            {preview.destinationUrl}
+          </a>
+        </div>
+      )}
+
+      {preview && (
+        <div
+          style={{
+            background: C.white,
+            borderRadius: 16,
+            padding: 16,
+            border: `1px solid ${C.divider}`,
+            marginBottom: 16,
+          }}
+        >
+          <p
+            style={{
+              margin: "0 0 8px",
+              fontSize: 10,
+              fontWeight: 700,
+              color: C.teal700,
+              letterSpacing: "0.08em",
+            }}
+          >
+            CASE DATA TO BE SUBMITTED
+          </p>
+          <pre
+            style={{
+              margin: 0,
+              fontSize: 10,
+              maxHeight: 300,
+              overflow: "auto",
+              background: C.bgCanvas,
+              padding: 12,
+              borderRadius: 8,
+              whiteSpace: "pre-wrap",
+            }}
+          >
+            {JSON.stringify(preview.submissionData, null, 2)}
+          </pre>
+          <p
+            style={{ margin: "8px 0 0", fontSize: 10, color: C.textSecondary }}
+          >
+            Checksum: <code>{preview.previewChecksum}</code>
+          </p>
+        </div>
+      )}
+
+      {!confirmed && (
+        <button
+          onClick={handleConfirm}
+          disabled={confirming}
+          style={{
+            width: "100%",
+            padding: "14px",
+            borderRadius: 24,
+            border: "none",
+            background: confirming ? "#9AA6A3" : C.teal600,
+            color: C.white,
+            fontSize: 14,
+            fontWeight: 700,
+            cursor: confirming ? "not-allowed" : "pointer",
+          }}
+        >
+          {confirming ? "Confirming…" : "Confirm & Open Filing Portal"}
+        </button>
+      )}
+
+      {confirmed && handoff && (
+        <div
+          style={{
+            marginTop: 16,
+            background: C.successBg,
+            borderRadius: 16,
+            padding: 16,
+            border: `1px solid ${C.teal600}`,
+          }}
+        >
+          <p
+            style={{
+              margin: "0 0 8px",
+              fontSize: 12,
+              fontWeight: 700,
+              color: C.teal700,
+            }}
+          >
+            ✅ Case Filed Successfully
+          </p>
+          <p style={{ margin: 0, fontSize: 11, color: C.teal700 }}>
+            Your case has been filed. The portal handoff is ready.
+          </p>
+          {handoff.url && (
+            <a
+              href={handoff.url}
+              target="_blank"
+              rel="noopener noreferrer"
+              style={{
+                display: "inline-block",
+                marginTop: 12,
+                padding: "12px 16px",
+                borderRadius: 20,
+                background: C.teal600,
+                color: C.white,
+                fontWeight: 700,
+                textDecoration: "none",
+              }}
+            >
+              Open Portal Handoff
+            </a>
+          )}
+          {handoff.trackingNumber && (
+            <p style={{ margin: "12px 0 0", fontSize: 11, color: C.teal700 }}>
+              Tracking Number: <strong>{handoff.trackingNumber}</strong>
+            </p>
+          )}
+        </div>
+      )}
+
+      <button
+        onClick={onHome}
+        style={{
+          marginTop: 16,
+          width: "100%",
+          padding: "12px",
+          borderRadius: 24,
+          border: `1px solid ${C.teal600}`,
+          background: C.white,
+          color: C.teal700,
+          fontWeight: 700,
+        }}
+      >
+        Return to Home
+      </button>
+    </div>
+  )
+}
+
 // ─── Real "My Cases" Screen ───────────────────────────────────────────────────
 
 function MyCasesScreen({
@@ -2860,6 +4094,7 @@ function MyCasesScreen({
   error,
   onRetry,
   onSelectCase,
+  onContinueCase,
   onNewReport,
 }: {
   cases: CaseRecord[]
@@ -2867,6 +4102,7 @@ function MyCasesScreen({
   error: string
   onRetry: () => void
   onSelectCase: (c: CaseRecord) => void
+  onContinueCase: (c: CaseRecord) => void
   onNewReport: () => void
 }) {
   return (
@@ -2915,7 +4151,9 @@ function MyCasesScreen({
       </div>
 
       {loading ? (
-        <p style={{ marginTop: 24, textAlign: "center", color: C.textSecondary }}>
+        <p
+          style={{ marginTop: 24, textAlign: "center", color: C.textSecondary }}
+        >
           Loading saved reports...
         </p>
       ) : error ? (
@@ -2970,85 +4208,135 @@ function MyCasesScreen({
         </div>
       ) : (
         <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
-          {cases.map((c) => (
-            <div
-              key={c.id}
-              onClick={() => onSelectCase(c)}
-              style={{
-                background: C.white,
-                borderRadius: 16,
-                padding: "16px",
-                cursor: "pointer",
-                boxShadow: "0 2px 8px rgba(11,46,46,0.06)",
-                border: `1px solid ${C.divider}`,
-              }}
-            >
+          {cases.map((c) => {
+            const open = isCaseOpen(c)
+            return (
               <div
+                key={c.id}
+                onClick={() => onSelectCase(c)}
                 style={{
-                  display: "flex",
-                  justifyContent: "space-between",
-                  alignItems: "flex-start",
-                  marginBottom: 6,
+                  background: C.white,
+                  borderRadius: 16,
+                  padding: "16px",
+                  cursor: "pointer",
+                  boxShadow: "0 2px 8px rgba(11,46,46,0.06)",
+                  border: `1px solid ${open ? C.teal600 : C.divider}`,
                 }}
               >
-                <span
+                <div
                   style={{
-                    fontSize: 11,
-                    fontWeight: 700,
-                    color: C.teal700,
-                    fontFamily: "monospace",
+                    display: "flex",
+                    justifyContent: "space-between",
+                    alignItems: "flex-start",
+                    marginBottom: 6,
                   }}
                 >
-                  {c.trackingNumber || `Case ID: ${c.id}`}
-                </span>
-                <span
-                  style={{
-                    background: c.status === "FILED" ? C.mint100 : "#FDECC8",
-                    color: c.status === "FILED" ? C.teal700 : "#9A6100",
-                    fontSize: 10,
-                    fontWeight: 700,
-                    padding: "3px 8px",
-                    borderRadius: 8,
-                  }}
-                >
-                  {c.status}
-                </span>
-              </div>
+                  <span
+                    style={{
+                      fontSize: 11,
+                      fontWeight: 700,
+                      color: C.teal700,
+                      fontFamily: "monospace",
+                    }}
+                  >
+                    {c.trackingNumber || `Case ID: ${c.id}`}
+                  </span>
+                  <span
+                    style={{
+                      background: open ? "#FFF4D6" : C.mint100,
+                      color: open ? "#9A6100" : C.teal700,
+                      fontSize: 10,
+                      fontWeight: 700,
+                      padding: "3px 8px",
+                      borderRadius: 8,
+                    }}
+                  >
+                    {open ? "OPEN" : c.status}
+                  </span>
+                </div>
 
-              <p
-                style={{
-                  margin: "0 0 4px",
-                  fontSize: 15,
-                  fontWeight: 700,
-                  color: C.textPrimary,
-                }}
-              >
-                {c.category}
-              </p>
-              <p
-                style={{
-                  margin: "0 0 8px",
-                  fontSize: 12,
-                  color: C.textSecondary,
-                }}
-              >
-                Loss: <strong style={{ color: C.danger }}>{c.amount}</strong> •{" "}
-                {c.incidentDate}
-              </p>
-              <p
-                style={{
-                  margin: 0,
-                  fontSize: 12,
-                  color: C.textSecondary,
-                  overflow: "hidden",
-                  textOverflow: "ellipsis",
-                  whiteSpace: "nowrap",
-                }}
-              >
-                {c.complaintNarrative}
-              </p>
-            </div>
-          ))}
+                <p
+                  style={{
+                    margin: "0 0 4px",
+                    fontSize: 15,
+                    fontWeight: 700,
+                    color: C.textPrimary,
+                  }}
+                >
+                  {c.category || "Unclassified incident"}
+                </p>
+                <p
+                  style={{
+                    margin: "0 0 8px",
+                    fontSize: 12,
+                    color: C.textSecondary,
+                  }}
+                >
+                  Loss:{" "}
+                  <strong style={{ color: C.danger }}>
+                    {c.amount || "Not provided"}
+                  </strong>{" "}
+                  • {c.incidentDate || "Date not set"}
+                </p>
+                <p
+                  style={{
+                    margin: "0 0 10px",
+                    fontSize: 12,
+                    color: C.textSecondary,
+                    overflow: "hidden",
+                    textOverflow: "ellipsis",
+                    whiteSpace: "nowrap",
+                  }}
+                >
+                  {c.complaintNarrative || c.summary || "No details saved yet."}
+                </p>
+                <div style={{ display: "flex", gap: 8 }}>
+                  {open && (
+                    <button
+                      type="button"
+                      onClick={(e) => {
+                        e.stopPropagation()
+                        onContinueCase(c)
+                      }}
+                      style={{
+                        flex: 1,
+                        background: C.teal700,
+                        color: C.white,
+                        border: "none",
+                        borderRadius: 10,
+                        padding: "8px 10px",
+                        fontSize: 12,
+                        fontWeight: 700,
+                        cursor: "pointer",
+                      }}
+                    >
+                      Continue report
+                    </button>
+                  )}
+                  <button
+                    type="button"
+                    onClick={(e) => {
+                      e.stopPropagation()
+                      onSelectCase(c)
+                    }}
+                    style={{
+                      flex: open ? "0 0 auto" : 1,
+                      background: C.white,
+                      color: C.teal700,
+                      border: `1px solid ${C.teal600}`,
+                      borderRadius: 10,
+                      padding: "8px 10px",
+                      fontSize: 12,
+                      fontWeight: 700,
+                      cursor: "pointer",
+                    }}
+                  >
+                    View details
+                  </button>
+                </div>
+              </div>
+            )
+          })}
         </div>
       )}
     </div>
@@ -3060,9 +4348,13 @@ function MyCasesScreen({
 function CaseStatusScreen({
   caseRecord,
   onBack,
+  onContinue,
+  onSummary,
 }: {
   caseRecord: CaseRecord | null
   onBack: () => void
+  onContinue: (c: CaseRecord) => void
+  onSummary?: (c: CaseRecord) => void
 }) {
   if (!caseRecord) {
     return (
@@ -3124,6 +4416,58 @@ function CaseStatusScreen({
       </div>
 
       <div style={{ flex: 1, overflowY: "auto", padding: "16px 20px 24px" }}>
+        {isCaseOpen(caseRecord) && (
+          <div style={{ marginBottom: 14 }}>
+            <PrimaryButton
+              label="Continue open report"
+              onClick={() => onContinue(caseRecord)}
+            />
+            <p
+              style={{
+                margin: "8px 0 0",
+                fontSize: 11,
+                color: C.textSecondary,
+                lineHeight: 1.4,
+              }}
+            >
+              Open case: your saved report fields and uploaded evidence stay
+              linked to this case. Continue to add details, upload evidence, and
+              finalize.
+            </p>
+          </div>
+        )}
+        {onSummary && (
+          <div style={{ marginBottom: 16 }}>
+            <button
+              type="button"
+              onClick={() => onSummary(caseRecord)}
+              style={{
+                width: "100%",
+                border: `1px solid ${C.teal600}`,
+                background: C.white,
+                color: C.teal700,
+                borderRadius: 24,
+                padding: "11px 14px",
+                fontSize: 13,
+                fontWeight: 700,
+                cursor: "pointer",
+              }}
+            >
+              Summary & awareness post
+            </button>
+            <p
+              style={{
+                margin: "8px 0 0",
+                fontSize: 11,
+                color: C.textSecondary,
+                lineHeight: 1.4,
+              }}
+            >
+              Read the saved English or Hindi summary, or create a safe social
+              media post from it.
+            </p>
+          </div>
+        )}
         {/* Summary Card */}
         <div
           style={{
@@ -3154,15 +4498,15 @@ function CaseStatusScreen({
             </span>
             <span
               style={{
-                background: C.mint100,
-                color: C.teal700,
+                background: isCaseOpen(caseRecord) ? "#FFF4D6" : C.mint100,
+                color: isCaseOpen(caseRecord) ? "#9A6100" : C.teal700,
                 fontSize: 10,
                 fontWeight: 700,
                 padding: "3px 8px",
                 borderRadius: 8,
               }}
             >
-              {caseRecord.status}
+              {isCaseOpen(caseRecord) ? "OPEN" : caseRecord.status}
             </span>
           </div>
           <h3
@@ -3245,11 +4589,7 @@ function CaseStatusScreen({
 
 // ─── Real Defend Community Feed Screen ────────────────────────────────────────
 
-function DefendScreen({
-  onStartReport,
-}: {
-  onStartReport: () => void
-}) {
+function DefendScreen({ onStartReport }: { onStartReport: () => void }) {
   const officialResources = [
     {
       name: "CERT-In advisories",
@@ -3361,312 +4701,6 @@ function DefendScreen({
   )
 }
 
-// ─── Real Profile Screen ──────────────────────────────────────────────────────
-
-function ProfileScreen({
-  userProfile,
-  setUserProfile,
-  language,
-  setLanguage,
-  onLogout,
-  userId,
-}: {
-  userProfile: any
-  setUserProfile: any
-  language: "en" | "hi" | "bn"
-  setLanguage: (l: "en" | "hi" | "bn") => void
-  onLogout: () => Promise<void>
-  userId?: string
-}) {
-  const [editing, setEditing] = useState(false)
-  const [name, setName] = useState(userProfile.displayName || "")
-  const [phone, setPhone] = useState(
-    (userProfile.phone || "").replace("+91 ", ""),
-  )
-  const [stateDistrict, setStateDistrict] = useState(
-    userProfile.stateDistrict || "",
-  )
-  const [lang, setLang] = useState<"en" | "hi" | "bn">(language)
-  const [busy, setBusy] = useState(false)
-  const [error, setError] = useState("")
-  const [notice, setNotice] = useState("")
-
-  useEffect(() => {
-    if (!editing) return
-    setName(userProfile.displayName || "")
-    setPhone((userProfile.phone || "").replace("+91 ", ""))
-    setStateDistrict(userProfile.stateDistrict || "")
-    setLang(language)
-    setError("")
-    setNotice("")
-  }, [editing, userProfile, language])
-
-  const startEditing = () => {
-    setName(userProfile.displayName || "")
-    setPhone((userProfile.phone || "").replace("+91 ", ""))
-    setStateDistrict(userProfile.stateDistrict || "")
-    setLang(language)
-    setError("")
-    setNotice("")
-    setEditing(true)
-  }
-
-  const cancelEditing = () => {
-    setEditing(false)
-    setError("")
-    setNotice("")
-  }
-
-  const handleSave = async () => {
-    if (name.trim().length < 2) {
-      setError("Please enter your legal name for the report.")
-      return
-    }
-    setBusy(true)
-    setError("")
-    setNotice("")
-    try {
-      const cleanPhone = phone.trim()
-        ? phone.startsWith("+91")
-          ? phone.trim()
-          : `+91 ${phone.replace(/\D/g, "")}`
-        : ""
-      const updated = {
-        displayName: name.trim(),
-        phone: cleanPhone,
-        email: userProfile.email,
-        stateDistrict: stateDistrict.trim(),
-        language: lang,
-      }
-      setUserProfile(updated)
-      setLanguage(lang)
-
-      if (userId) {
-        await updateProfile(userId, { full_name: name.trim() })
-      }
-      await supabase.auth.updateUser({
-        data: {
-          full_name: name.trim(),
-          displayName: name.trim(),
-          phone_e164: cleanPhone,
-          state_district: stateDistrict.trim(),
-          preferred_language: lang,
-        },
-      })
-
-      setNotice("Profile updated successfully.")
-      setEditing(false)
-    } catch (err: any) {
-      setError(err?.message || "Could not update profile.")
-    } finally {
-      setBusy(false)
-    }
-  }
-
-  return (
-    <div
-      style={{
-        flex: 1,
-        overflowY: "auto",
-        background: C.bgCanvas,
-        padding: "20px",
-      }}
-    >
-      {/* Avatar Header */}
-      <div style={{ textAlign: "center", marginBottom: 20 }}>
-        <div
-          style={{
-            width: 68,
-            height: 68,
-            borderRadius: "50%",
-            background: `linear-gradient(135deg, ${C.teal600}, ${C.teal500})`,
-            margin: "0 auto 10px",
-            display: "flex",
-            alignItems: "center",
-            justifyContent: "center",
-            fontSize: 26,
-            color: C.white,
-            fontWeight: 700,
-          }}
-        >
-          {userProfile.displayName
-            ? userProfile.displayName.slice(0, 2).toUpperCase()
-            : "👤"}
-        </div>
-        <p
-          style={{
-            margin: "0 0 2px",
-            fontSize: 17,
-            fontWeight: 700,
-            color: C.textPrimary,
-          }}
-        >
-          {userProfile.displayName || "Complainant"}
-        </p>
-        <p style={{ margin: 0, fontSize: 12, color: C.textSecondary }}>
-          {userProfile.email}
-        </p>
-        {!editing && (
-          <button
-            onClick={startEditing}
-            style={{
-              marginTop: 12,
-              padding: "8px 16px",
-              borderRadius: 20,
-              border: `1.5px solid ${C.teal600}`,
-              background: C.white,
-              color: C.teal600,
-              fontSize: 12,
-              fontWeight: 700,
-              cursor: "pointer",
-            }}
-          >
-            ✏️ Edit Profile
-          </button>
-        )}
-      </div>
-
-{editing && (
-        <ProfileSetupScreen
-          userId={userId}
-          userProfile={userProfile}
-          setUserProfile={setUserProfile}
-          onDone={cancelEditing}
-          language={language}
-        />
-      )}
-
-      {!editing && (
-      <div
-        style={{
-          background: C.white,
-          borderRadius: 16,
-          overflow: "hidden",
-          marginBottom: 16,
-          border: `1px solid ${C.divider}`,
-        }}
-      >
-        <div
-          style={{
-            padding: "14px 16px",
-            borderBottom: `1px solid ${C.divider}`,
-          }}
-        >
-          <p
-            style={{ margin: "0 0 2px", fontSize: 11, color: C.textSecondary }}
-          >
-            Contact Phone
-          </p>
-          <p
-            style={{
-              margin: 0,
-              fontSize: 14,
-              color: C.textPrimary,
-              fontWeight: 600,
-            }}
-          >
-            {userProfile.phone || "Not provided"}
-          </p>
-        </div>
-
-        <div
-          style={{
-            padding: "14px 16px",
-            borderBottom: `1px solid ${C.divider}`,
-          }}
-        >
-          <p
-            style={{ margin: "0 0 2px", fontSize: 11, color: C.textSecondary }}
-          >
-            State / Jurisdiction
-          </p>
-          <p
-            style={{
-              margin: 0,
-              fontSize: 14,
-              color: C.textPrimary,
-              fontWeight: 600,
-            }}
-          >
-            {userProfile.stateDistrict || "Not provided"}
-          </p>
-        </div>
-
-        <div
-          style={{
-            padding: "14px 16px",
-            display: "flex",
-            justifyContent: "space-between",
-            alignItems: "center",
-          }}
-        >
-          <div>
-            <p
-              style={{
-                margin: "0 0 2px",
-                fontSize: 11,
-                color: C.textSecondary,
-              }}
-            >
-              App Language
-            </p>
-            <p
-              style={{
-                margin: 0,
-                fontSize: 14,
-                color: C.textPrimary,
-                fontWeight: 600,
-              }}
-            >
-              {language === "hi"
-                ? "हिंदी (Hindi)"
-                : language === "bn"
-                  ? "বাংলা (Bengali)"
-                  : "English"}
-            </p>
-          </div>
-          <select
-            value={language}
-            onChange={(e) => setLanguage(e.target.value as "en" | "hi" | "bn")}
-            style={{
-              padding: "6px 10px",
-              borderRadius: 8,
-              border: `1px solid ${C.divider}`,
-              fontSize: 12,
-              background: C.mint100,
-              color: C.teal700,
-              fontWeight: 600,
-            }}
-          >
-            <option value="en">English</option>
-            <option value="hi">हिंदी</option>
-            <option value="bn">বাংলা</option>
-          </select>
-        </div>
-      </div>
-      )}
-
-      {/* Sign Out Button */}
-      <button
-        onClick={() => void onLogout()}
-        style={{
-          width: "100%",
-          padding: "14px",
-          borderRadius: 24,
-          border: `2px solid ${C.danger}`,
-          background: "transparent",
-          color: C.danger,
-          fontSize: 14,
-          fontWeight: 700,
-          cursor: "pointer",
-        }}
-      >
-        Sign Out of Cyber Sathi
-      </button>
-    </div>
-  )
-}
-
 // ─── Tab Bar Component ────────────────────────────────────────────────────────
 
 function TabBar({
@@ -3684,17 +4718,22 @@ function TabBar({
   ]
 
   return (
-    <div
+    <nav
+      aria-label="Primary navigation"
       style={{
         background: C.white,
         borderTop: `1px solid ${C.divider}`,
         display: "flex",
-        height: 62,
+        height: "calc(62px + env(safe-area-inset-bottom, 0px))",
+        flexShrink: 0,
       }}
     >
       {tabs.map((t) => (
         <button
           key={t.key}
+          type="button"
+          aria-label={t.label}
+          aria-current={active === t.key ? "page" : undefined}
           onClick={() => onSwitch(t.key)}
           style={{
             flex: 1,
@@ -3737,7 +4776,7 @@ function TabBar({
           </span>
         </button>
       ))}
-    </div>
+    </nav>
   )
 }
 
@@ -3756,6 +4795,7 @@ function PrimaryButton({
 }) {
   return (
     <button
+      className="cy-btn cy-btn-primary"
       onClick={disabled ? undefined : onClick}
       disabled={disabled}
       style={{
@@ -3786,6 +4826,7 @@ function SecondaryButton({
 }) {
   return (
     <button
+      className="cy-btn cy-btn-secondary"
       onClick={onClick}
       style={{
         width: "100%",

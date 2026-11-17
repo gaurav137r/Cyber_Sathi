@@ -132,6 +132,20 @@ export class CasesService {
       data: { updatedAt: new Date() },
     })
   }
+
+  async state(id: string) {
+    const caseData = await this.prisma.case.findUnique({
+      where: { id },
+    })
+    if (!caseData) {
+      throw new NotFoundException(`Case ${id} not found`)
+    }
+    return {
+      caseId: caseData.id,
+      status: caseData.status,
+      fields: caseData.structuredFields,
+    }
+  }
 }
 
 function asObject(value: Prisma.JsonValue | null): Record<string, unknown> {

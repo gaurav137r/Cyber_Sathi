@@ -1,10 +1,11 @@
 import {
   BadRequestException,
+  ConflictException,
   Injectable,
   NotFoundException,
 } from "@nestjs/common"
 import { Case, CaseStatus, Prisma } from "@prisma/client"
-import { PrismaService } from "../infra/prisma.service"
+import { PrismaService, withDbRetry } from "../infra/prisma.service"
 import { AuthUser } from "../auth/auth.service"
 import { CreateCaseDto, TransitionCaseDto, UpdateCaseDto } from "./case.dto"
 import { ConfigService } from "@nestjs/config"
@@ -17,6 +18,10 @@ const transitions: Record<CaseStatus, CaseStatus[]> = {
   FILED: [CaseStatus.RESOLVED, CaseStatus.ARCHIVED],
   RESOLVED: [CaseStatus.ARCHIVED],
   ARCHIVED: [],
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value)
 }
 
 @Injectable()
@@ -53,27 +58,67 @@ export class CaseService {
     requestId?: string,
   ): Promise<Case> {
     const existing = await this.findOne(id, user.id)
-    const updated = await this.prisma.case.update({
-      where: { id: existing.id },
-      data: {
-        category: input.category,
-        categoryConfidence: input.categoryConfidence,
-        detectedLanguage: input.detectedLanguage,
-        rawTranscript: input.rawTranscript,
-        filingDestination: input.filingDestination,
-        trackingNumber: input.trackingNumber,
-        ...(input.structuredFields
-          ? {
-              structuredFields: input.structuredFields as Prisma.InputJsonValue,
-            }
-          : {}),
-      },
-    })
-    await this.audit(id, user.id, "CASE_UPDATED", {
-      requestId,
-      fields: Object.keys(input),
-    })
-    return updated
+    const currentRevision = existing.updatedAt.toISOString()
+    if (input.expectedRevision && input.expectedRevision !== currentRevision)
+      throw new ConflictException({
+        message: "The case changed. Refresh it before saving your edits.",
+        currentRevision,
+      })
+    const currentFields = isRecord(existing.structuredFields)
+      ? existing.structuredFields
+      : {}
+    const editedFields = input.structuredFields as
+      | Record<string, unknown>
+      | undefined
+    const currentConfirmed = isRecord(currentFields.confirmedFields)
+      ? currentFields.confirmedFields
+      : {}
+    const mergedStructuredFields = editedFields || input.category
+      ? {
+          ...currentFields,
+          ...(editedFields ?? {}),
+          confirmedFields: {
+            ...currentConfirmed,
+            ...(editedFields ?? {}),
+            ...(input.category ? { category: input.category } : {}),
+          },
+        }
+      : undefined
+    const updatedAt = new Date(Math.max(Date.now(), existing.updatedAt.getTime() + 1))
+    return withDbRetry(() =>
+      this.prisma.$transaction(async (tx) => {
+      const saved = await tx.case.updateMany({
+        where: { id: existing.id, userId: user.id, updatedAt: existing.updatedAt },
+        data: {
+          category: input.category,
+          categoryConfidence: input.categoryConfidence,
+          detectedLanguage: input.detectedLanguage,
+          rawTranscript: input.rawTranscript,
+          filingDestination: input.filingDestination,
+          trackingNumber: input.trackingNumber,
+          ...(mergedStructuredFields
+            ? { structuredFields: mergedStructuredFields as Prisma.InputJsonValue }
+            : {}),
+          updatedAt,
+        },
+      })
+      if (saved.count !== 1)
+        throw new ConflictException("The case changed while saving. Refresh and try again.")
+      await tx.auditLogEntry.create({
+        data: {
+          caseId: id,
+          actorUserId: user.id,
+          action: "CASE_UPDATED",
+          metadata: {
+            requestId,
+            fields: Object.keys(input).filter((field) => field !== "expectedRevision"),
+          },
+          timestamp: updatedAt,
+        },
+      })
+      return tx.case.findUniqueOrThrow({ where: { id } })
+      }, { timeout: 20_000 }),
+    )
   }
 
   async transition(
@@ -132,6 +177,14 @@ export class CaseService {
       where: { id },
       data: { updatedAt: new Date() },
     })
+  }
+async state(id: string): Promise<{ caseId: string; status: string; fields: any }> {
+    const caseData = await this.findOne(id)
+    return {
+      caseId: caseData.id,
+      status: caseData.status,
+      fields: caseData.structuredFields,
+    }
   }
 
   async findAll(userId: string): Promise<Case[]> {

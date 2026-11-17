@@ -1,6 +1,6 @@
 import Constants from "expo-constants"
 
-import { useEffect, useRef } from "react"
+import { useRef } from "react"
 
 import {
   PermissionsAndroid,
@@ -15,19 +15,14 @@ import { WebView } from "react-native-webview"
 const expoHost = Constants.expoConfig?.hostUri?.split(":")[0]
 
 const appUrl =
-  process.env.EXPO_PUBLIC_WEB_URL ??
-  (expoHost ? `http://${expoHost}:8443` : null)
+  (globalThis as { process?: { env?: Record<string, string | undefined> } })
+    .process?.env?.EXPO_PUBLIC_WEB_URL ??
+  (expoHost
+    ? `http://${expoHost}:8443`
+    : null)
 
 export default function App() {
   const webViewRef = useRef<WebView<any>>(null)
-
-  useEffect(() => {
-    if (Platform.OS === "android") {
-      void PermissionsAndroid.request(
-        PermissionsAndroid.PERMISSIONS.RECORD_AUDIO,
-      ).catch(() => undefined)
-    }
-  }, [])
 
   if (!appUrl) {
     return (
@@ -63,10 +58,15 @@ export default function App() {
           handlePermissionResult(true)
           return
         }
-        const result = await PermissionsAndroid.request(
-          PermissionsAndroid.PERMISSIONS.RECORD_AUDIO,
-        )
-        handlePermissionResult(result === PermissionsAndroid.RESULTS.GRANTED)
+        try {
+          const result = await PermissionsAndroid.request(
+            PermissionsAndroid.PERMISSIONS.RECORD_AUDIO,
+          )
+          handlePermissionResult(result === PermissionsAndroid.RESULTS.GRANTED)
+        } catch (error) {
+          console.warn("Failed to request Android microphone permission", error)
+          handlePermissionResult(false)
+        }
         return
       }
 
@@ -97,30 +97,6 @@ export default function App() {
         mediaPlaybackRequiresUserGesture={false}
         allowsInlineMediaPlayback
         onMessage={handleWebViewMessage}
-        onPermissionRequest={(request) => {
-          // Only the trusted app origin may request microphone access. Ask Android
-          // through its runtime permission API before granting the WebView request.
-          const trustedOrigin = appUrl ? new URL(appUrl).origin : ""
-          const isTrustedOrigin = request.origin === trustedOrigin
-          const requestsAudio = request.resources.includes("AUDIO_CAPTURE")
-          if (
-            !isTrustedOrigin ||
-            !requestsAudio ||
-            request.resources.length !== 1
-          ) {
-            request.deny()
-            return
-          }
-          void PermissionsAndroid.request(
-            PermissionsAndroid.PERMISSIONS.RECORD_AUDIO,
-          )
-            .then((result) => {
-              if (result === PermissionsAndroid.RESULTS.GRANTED)
-                request.grant(["AUDIO_CAPTURE"])
-              else request.deny()
-            })
-            .catch(() => request.deny())
-        }}
       />
     </View>
   )

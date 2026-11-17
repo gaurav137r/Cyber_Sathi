@@ -33,20 +33,22 @@ enum ReportKind {
 /// Retention: until the user deletes the account or the last related case
 /// retention window expires — needed to scope cases and audit actors.
 model User {
-  id                  String          @id @default(uuid())
-  supabaseId          String?         @unique
-  email               String?         @unique
-  phoneE164           String?         @unique
-  displayName         String?
-  preferredLanguage   String          @default("en")
-  state               String?
-  district            String?
-  onboardingCompleted Boolean         @default(false)
-  onboardingStep      String?         @default("language")
-  createdAt           DateTime        @default(now())
-  updatedAt           DateTime        @updatedAt
+  id                  String          @id @default(uuid()) @map("id")
+  supabaseId          String?         @unique @map("supabaseid")
+  email               String?         @unique @map("email")
+  phoneE164           String?         @unique @map("phonee164")
+  displayName         String?       @map("displayname")
+  preferredLanguage   String          @default("en") @map("preferredlanguage")
+  state               String?       @map("state")
+  district            String?       @map("district")
+  onboardingCompleted Boolean         @default(false) @map("onboardingcompleted")
+  onboardingStep      String?       @default("language") @map("onboardingstep")
+  createdAt           DateTime        @default(now()) @map("createdat")
+  updatedAt           DateTime        @updatedAt @map("updatedat")
   cases               Case[]
+  conversations       Conversation[]
   auditLogs           AuditLogEntry[]
+  generatedImages     GeneratedImage[]
 
   @@map("users")
 }
@@ -54,26 +56,30 @@ model User {
 /// Private case record. Never send this row to social surfaces — use ReportVersion PUBLIC_REDACTED.
 /// Retention: active while status != ARCHIVED; archived cases kept 24 months for tracking/escalation, then eligible for purge.
 model Case {
-  id                         String          @id @default(uuid())
-  userId                     String
-  user                       User            @relation(fields: [userId], references: [id], onDelete: Restrict)
-  status                     CaseStatus      @default(DRAFT)
-  category                   String?
-  categoryConfidence         Float?
-  classificationExplanation String?
-  clarificationRequired      Boolean         @default(false)
-  detectedLanguage           String?
-  rawTranscript              String?
-  canonicalTranscript        String?
-  structuredFields           Json?
-  canonicalEntities          Json?           @default("{}")
-  filingDestination          String?
-  trackingNumber             String?
-  createdAt                  DateTime        @default(now())
-  updatedAt                  DateTime        @updatedAt
-  evidenceItems              EvidenceItem[]
-  reportVersions             ReportVersion[]
-  auditLogs                  AuditLogEntry[]
+  id                        String          @id @default(uuid()) @map("id") @db.Uuid
+  userId                    String          @map("userId")
+  user                      User            @relation(fields: [userId], references: [id], onDelete: Restrict)
+  status                    CaseStatus      @default(DRAFT) @map("status")
+  category                  String?       @map("category")
+  categoryConfidence        Float?        @map("categoryconfidence")
+  classificationExplanation String?       @map("classificationexplanation")
+  clarificationRequired     Boolean       @default(false) @map("clarificationrequired")
+  detectedLanguage          String?       @map("detectedlanguage")
+  rawTranscript             String?       @map("rawtranscript")
+  canonicalTranscript       String?       @map("canonicaltranscript")
+  structuredFields          Json?         @map("structuredfields")
+  canonicalEntities         Json?         @default("{}") @map("canonicalentities")
+  filingDestination         String?       @map("filingdestination")
+  trackingNumber            String?       @map("trackingnumber")
+  createdAt                 DateTime      @default(now()) @map("createdat")
+  updatedAt                 DateTime      @updatedAt @map("updatedat")
+  evidenceItems             EvidenceItem[]
+  reportVersions            ReportVersion[]
+  needsHuman                Boolean       @default(false) @map("needs_human")
+  socialPosts               SocialPost[]
+  auditLogs                 AuditLogEntry[]
+  conversations             Conversation[]
+  generatedImages           GeneratedImage[]
 
   @@index([userId, createdAt])
   @@index([status])
@@ -83,14 +89,14 @@ model Case {
 /// Binary files live in MinIO/S3; this row is metadata only.
 /// Retention: same window as parent Case; objects deleted from the bucket on purge.
 model EvidenceItem {
-  id                String       @id @default(uuid())
-  caseId            String
+  id                String       @id @default(uuid()) @db.Uuid
+  caseId            String       @map("caseid") @db.Uuid
   case              Case         @relation(fields: [caseId], references: [id], onDelete: Cascade)
   type              EvidenceType
-  storageKey        String
-  extractedText     String?
-  extractedEntities Json?
-  uploadedAt        DateTime     @default(now())
+  storageKey        String       @map("storagekey")
+  extractedText     String?      @map("extractedtext")
+  extractedEntities Json?        @map("extractedentities")
+  uploadedAt        DateTime     @map("uploadedat") @default(now()) @db.Timestamptz(3)
 
   @@index([caseId])
   @@map("evidence_items")
@@ -99,26 +105,66 @@ model EvidenceItem {
 /// INTERNAL = full private snapshot. PUBLIC_REDACTED = post-redaction derivative only.
 /// Retention: INTERNAL same as Case; PUBLIC_REDACTED kept while a public post exists (Stage 6+), else same as Case.
 model ReportVersion {
-  id          String     @id @default(uuid())
-  caseId      String
+  id          String     @id @default(uuid()) @db.Uuid
+  caseId      String     @map("caseid") @db.Uuid
   case        Case       @relation(fields: [caseId], references: [id], onDelete: Cascade)
   version     Int
   kind        ReportKind
   content     Json
-  generatedAt DateTime   @default(now())
+  generatedAt DateTime   @map("generatedat") @default(now()) @db.Timestamptz(3)
 
   @@unique([caseId, version, kind])
   @@index([caseId])
   @@map("report_versions")
 }
 
+/// Bland AI voice conversation session. Links a case to a Bland voice session.
+/// Retention: same window as parent Case.
+model Conversation {
+  id             String    @id @default(uuid()) @map("id")
+  caseId         String    @map("caseid")
+  case           Case      @relation(fields: [caseId], references: [id], onDelete: Cascade)
+  userId         String    @map("userid")
+  user           User      @relation(fields: [userId], references: [id], onDelete: Restrict)
+  blandAgentId   String?   @map("blandagentid")
+  blandSessionId String?   @unique @map("blandsessionid")
+  status         String    @default("active") @map("status")
+  channel        String    @default("voice") @map("channel")
+  createdAt      DateTime  @default(now()) @map("createdat")
+  updatedAt      DateTime  @updatedAt @map("updatedat")
+  messages       Message[]
+
+  @@index([caseId])
+  @@index([userId])
+  @@index([blandSessionId])
+  @@map("conversations")
+}
+
+/// A single message within a conversation (voice transcript or chat).
+/// Retention: same window as parent Conversation.
+model Message {
+  id             String      @id @default(uuid()) @map("id")
+  conversationId String      @map("conversationid")
+  conversation   Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  role           String      @map("role")
+  content        String      @map("content")
+  channel        String      @default("voice") @map("channel")
+  blandTurnId    String?     @map("blandturnid")
+  createdAt      DateTime    @default(now()) @map("createdat")
+
+  @@index([conversationId])
+  @@index([createdAt])
+  @@index([conversationId, createdAt, id])
+  @@map("messages")
+}
+
 /// Append-only confirmation/action log. Required for irreversible actions.
 /// Retention: 36 months (complaint + public-post confirmation evidence), then eligible for purge.
 model AuditLogEntry {
   id          String   @id @default(uuid())
-  caseId      String
+  caseId      String   @map("caseid")
   case        Case     @relation(fields: [caseId], references: [id], onDelete: Restrict)
-  actorUserId String
+  actorUserId String   @map("actoruserid")
   actor       User     @relation(fields: [actorUserId], references: [id], onDelete: Restrict)
   action      String
   metadata    Json?
@@ -127,4 +173,116 @@ model AuditLogEntry {
   @@index([caseId, timestamp])
   @@index([actorUserId, timestamp])
   @@map("audit_log_entries")
+}
+
+/// Social post generation for Stage 5 (social media).
+/// Retention: same as case; deleted when case is archived.
+model SocialPost {
+  id          String     @id @default(uuid()) @map("id") @db.Uuid
+  caseId      String     @map("caseid") @db.Uuid
+  case        Case     @relation(fields: [caseId], references: [id], onDelete: Cascade)
+  caption     String
+  hashtags    Json
+  imageUrl    String?    @map("imageurl")
+  platform    String
+  createdAt   DateTime   @map("createdat") @default(now()) @db.Timestamptz(3)
+  @@index([caseId])
+  @@map("social_posts")
+}
+
+enum GeneratedImageStatus {
+  PROCESSING
+  READY
+  FAILED
+}
+
+/// One AI background / composed poster job. The binary assets live in project
+/// storage; this row holds metadata, ownership and the render inputs.
+/// Retention: same as the parent case; files are cleaned up when the case is purged.
+model GeneratedImage {
+  id                    String               @id @default(uuid()) @map("id") @db.Uuid
+  caseId                String               @map("caseid") @db.Uuid
+  case                  Case                 @relation(fields: [caseId], references: [id], onDelete: Cascade)
+  userId                String               @map("userid") @db.Uuid
+  user                  User                 @relation(fields: [userId], references: [id], onDelete: Cascade)
+  status                GeneratedImageStatus @default(PROCESSING)
+  prompt                String
+  promptHash            String               @map("prompthash")
+  model                 String
+  steps                 Int                  @default(4)
+  template              String               @default("cyber-shield")
+  format                String               @default("png")
+  width                 Int
+  height                Int
+  backgroundKey         String?              @map("backgroundkey")
+  backgroundContentType String?              @map("backgroundcontenttype")
+  finalKey              String?              @map("finalkey")
+  finalContentType      String?              @map("finalcontenttype")
+  content               Json?
+  accentColor           String?              @map("accentcolor")
+  reusedFromId          String?              @map("reusedfromid") @db.Uuid
+  error                 String?
+  createdAt             DateTime             @default(now()) @map("createdat") @db.Timestamptz(3)
+  updatedAt             DateTime             @updatedAt @map("updatedat") @db.Timestamptz(3)
+
+  @@index([caseId, createdAt])
+  @@index([userId, createdAt])
+  @@index([promptHash, status])
+  @@map("generated_images")
+}
+
+/// Extended public profile for a registered user. One row per `users.id`.
+/// Holds KYC-adjacent and contact details used to personalise the voice agent
+/// and pre-fill reports. Sensitive identifiers (Aadhaar last-4, account
+/// last-4) are encrypted at rest before being written.
+model Profile {
+  id   String   @id @default(uuid()) @map("id") @db.Uuid
+
+  username              String?  @map("username")
+  avatarUrl             String?  @map("avatar_url")
+  bio                   String?  @map("bio")
+
+  /// Identity
+  fullName              String?  @map("full_name")
+  dateOfBirth           String?  @map("date_of_birth")
+  gender                String?  @map("gender")
+
+  /// Contact
+  mobile                String?  @map("mobile")
+  email                 String?  @map("email")
+
+  /// Address
+  addressLine1          String?  @map("address_line1")
+  city                  String?  @map("city")
+  district              String?  @map("district")
+  state                 String?  @map("state")
+  pinCode               String?  @map("pin_code")
+
+  /// Government ID (stored encrypted)
+  aadhaarLast4          String?  @map("aadhaar_last4")
+  pan                   String?  @map("pan")
+
+  /// Financial (stored encrypted)
+  bankName              String?  @map("bank_name")
+  accountNumberLast4    String?  @map("account_number_last4")
+  ifscCode              String?  @map("ifsc_code")
+  upiId                 String?  @map("upi_id")
+
+  /// Account
+  accountType           String?  @map("account_type")
+  preferredLanguage     String?  @map("preferred_language")
+  notificationSms       Boolean  @default(false) @map("notification_sms")
+  notificationEmail     Boolean  @default(false) @map("notification_email")
+  onboardingCompleted   Boolean  @default(false) @map("onboardingcompleted")
+  onboardingStep        String?  @map("onboardingstep")
+
+  /// Corporate (conditionally revealed)
+  gstNumber             String?  @map("gst_number")
+  companyName           String?  @map("company_name")
+  authorizedSignatoryName String? @map("authorized_signatory_name")
+
+  createdAt             DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt             DateTime @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  @@map("profiles")
 }

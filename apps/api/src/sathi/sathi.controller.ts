@@ -28,6 +28,7 @@ import { JwtAuthGuard } from "../auth/jwt-auth.guard"
 
 import {
   DeviceContextDto,
+  SathiTranscriptDto,
   SathiSpeechDto,
   SathiTurnQueryDto,
   StartSathiSessionDto,
@@ -35,12 +36,30 @@ import {
 
 import { SathiService } from "./sathi.service"
 
+import { ProfileService } from "../profile/profile.service"
+
+import { BlandService } from "./bland.service"
+
 @Controller()
 @UseGuards(JwtAuthGuard)
 @ApiTags("sathi")
 @ApiBearerAuth()
 export class SathiController {
-  constructor(private readonly sathi: SathiService) {}
+  constructor(
+    private readonly sathi: SathiService,
+    private readonly bland: BlandService,
+    private readonly profile: ProfileService,
+  ) {}
+
+  @Post("cases/:id/bland/session")
+  @ApiOperation({ summary: "Create a Bland AI voice session token for a case" })
+  blandSession(
+    @Param("id") id: string,
+    @Body() body: { language?: string } = {},
+    @CurrentUser() user: AuthUser,
+  ) {
+    return this.bland.createSessionToken(id, user.id, body?.language)
+  }
 
   @Post("sathi/session")
 
@@ -72,6 +91,16 @@ export class SathiController {
   @ApiOperation({ summary: "Read the current Sathi intake state" })
   state(@Param("id") id: string, @CurrentUser() user: AuthUser) {
     return this.sathi.state(id, user)
+  }
+
+  @Post("cases/:id/sathi/transcript")
+  @ApiOperation({ summary: "Persist a display transcript from the live voice provider" })
+  transcript(
+    @Param("id") id: string,
+    @Body() body: SathiTranscriptDto,
+    @CurrentUser() user: AuthUser,
+  ) {
+    return this.sathi.recordTranscript(id, user, body.role, body.text)
   }
 
   @Post("cases/:id/sathi/speech")
@@ -127,5 +156,18 @@ export class SathiController {
     @CurrentUser() user: AuthUser,
   ) {
     return this.sathi.submitDeviceContext(id, user, body)
+  }
+
+  @Get("cases/:id/sathi/context")
+
+  @ApiOperation({
+    summary: "Return the user's profile as voice-agent session context",
+  })
+  sathiContext(
+    @Param("id") id: string,
+    @CurrentUser() user: AuthUser,
+  ) {
+    // The case id establishes the session; context itself is the user's profile.
+    return this.profile.getSathiContext(user.supabaseId ?? user.id)
   }
 }

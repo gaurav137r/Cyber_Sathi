@@ -48,4 +48,10 @@ export class CasesController {
   ) {
     return this.cases.transition(id, dto)
   }
+
+  @Get(":id/state")
+  @ApiOperation({ summary: "Fetch case state (status and fields)" })
+  state(@Param("id", ParseUUIDPipe) id: string) {
+    return this.cases.state(id)
+  }
 }

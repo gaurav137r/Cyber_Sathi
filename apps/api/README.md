@@ -85,7 +85,7 @@ Transitions must follow `DRAFT -> PROCESSING -> CLASSIFIED -> REVIEWED -> FILED 
 
 ## Sathi Gemini voice agent
 
-Set `GEMINI_API_KEY` (Gemini API key from Google AI Studio). Optional overrides: `GEMINI_LIVE_MODEL` (default `gemini-3.8-live`), `GEMINI_TEXT_MODEL` (default `gemini-2.5-flash`), `GEMINI_VOICE_NAME` (default `Kore`).
+Set `GEMINI_API_KEY` (Gemini API key from Google AI Studio). Optional overrides: `GEMINI_LIVE_MODEL` (default `gemini-3.8-live`), `GEMINI_TEXT_MODEL` (default `gemini-3.6-flash`), `GEMINI_VOICE_NAME` (default `Kore`).
 
 The API never sends the long-lived key to the client. `POST /sathi/session` creates a case and mints a short-lived Live API token. The app can speak through that session, or send recorded audio/text to `POST /cases/:id/sathi/turns`. When a caller or SMS number is unclear, Sathi returns a `PICK_PHONE_NUMBER` client action; the Android/web UI lets the user choose a number and posts it to `POST /cases/:id/sathi/device-context`.
 
@@ -225,3 +225,24 @@ This skeleton intentionally stores no user name, phone number, exact address, ac
 | `AuditLogEntry` | Trace irreversible actions and service events | Not populated by Stage 2 endpoints; production policy must retain submission/share confirmations for the legally required period |
 
 No public/social content generation or government submission endpoint exists in Stage 2. Those flows must add hard redaction, explicit confirmation, and an audit entry before becoming executable.
+
+## AI poster studio
+
+`ImagesModule` adds a Cloudflare Workers AI + ImageMagick poster pipeline:
+
+- `GET /images/templates` — presets, templates, formats and safe limits.
+- `POST /cases/:caseId/images/generate-background` — AI artwork only.
+- `POST /cases/:caseId/images/render` — SVG typography over an existing
+  background.
+- `POST /cases/:caseId/images/generate` — full generate + render + export.
+- `GET /cases/:caseId/images` and `/:imageId` — metadata.
+- `GET /cases/:caseId/images/:imageId/file` and `/download` — authenticated
+  preview/download.
+
+The AI model only draws the background; all text, helpline numbers, logos and
+labels are rendered locally with SVG and ImageMagick. Backgrounds are cached by
+prompt hash so repeat renders do not spend another Cloudflare inference.
+
+See [docs/image-pipeline.md](../../docs/image-pipeline.md) for setup, image
+formats and presets, error handling, free-tier guidance, storage and the tested
+failure matrix.

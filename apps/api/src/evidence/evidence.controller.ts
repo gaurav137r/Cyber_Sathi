@@ -1,4 +1,5 @@
 import {
+  BadRequestException,
   Body,
   Controller,
   Get,
@@ -57,5 +58,25 @@ export class CaseEvidenceController {
     if (!file)
       throw new Error('A multipart file field named "file" is required')
     return this.evidence.upload(id, file, user, type)
+  }
+
+  @Post(":id/evidence/process")
+  processEvidence(
+    @Param("id") id: string,
+    @Query("evidenceId") evidenceId: string,
+    @CurrentUser() user: AuthUser,
+  ) {
+    if (!evidenceId)
+      throw new BadRequestException('An "evidenceId" query parameter is required')
+    return this.evidence.processEvidence(id, evidenceId, user)
+  }
+
+  @Get(":id/evidence/:evidenceId")
+  getEvidence(
+    @Param("id") id: string,
+    @Param("evidenceId") evidenceId: string,
+    @CurrentUser() user: AuthUser,
+  ) {
+    return this.evidence.getEvidence(id, evidenceId, user)
   }
 }

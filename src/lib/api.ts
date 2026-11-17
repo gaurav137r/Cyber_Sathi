@@ -20,7 +20,9 @@ export async function apiRequest<T>(
     ...init,
     headers: {
       Accept: "application/json",
-      ...(init.body ? { "Content-Type": "application/json" } : {}),
+      ...(init.body && !(init.body instanceof FormData)
+        ? { "Content-Type": "application/json" }
+        : {}),
       ...init.headers,
       Authorization: `Bearer ${session.access_token}`,
     },
@@ -39,4 +41,42 @@ export async function apiRequest<T>(
   }
 
   return (await response.json()) as T
+}
+
+export async function apiDownload(
+  path: string,
+): Promise<{ blob: Blob; fileName: string }> {
+  const {
+    data: { session },
+    error: sessionError,
+  } = await supabase.auth.getSession()
+  if (sessionError) throw sessionError
+  if (!session)
+    throw new Error("Your session has expired. Please sign in again.")
+
+  const response = await fetch(`${apiBaseUrl.replace(/\/+$/, "")}${path}`, {
+    headers: {
+      Accept: "*/*",
+      Authorization: `Bearer ${session.access_token}`,
+    },
+  })
+
+  if (!response.ok) {
+    const payload = (await response.json().catch(() => undefined)) as {
+      message?: string | string[]
+    } | undefined
+    const message = Array.isArray(payload?.message)
+      ? payload.message.join(". ")
+      : payload?.message
+    throw new Error(
+      message || `Download failed with status ${response.status}`,
+    )
+  }
+
+  const disposition = response.headers.get("content-disposition") ?? ""
+  const match = /filename="?([^";]+)"?/i.exec(disposition)
+  return {
+    blob: await response.blob(),
+    fileName: match?.[1] || "cyber-sathi-report",
+  }
 }

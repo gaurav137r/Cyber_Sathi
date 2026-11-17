@@ -1,12 +1,6 @@
 import { ApiProperty, ApiPropertyOptional } from "@nestjs/swagger"
 
-import {
-  IsArray,
-  IsIn,
-  IsOptional,
-  IsString,
-  MaxLength,
-} from "class-validator"
+import { IsArray, IsIn, IsOptional, IsString, MaxLength } from "class-validator"
 
 import { deviceContextSources } from "./sathi.types"
 
@@ -17,6 +11,13 @@ export class StartSathiSessionDto {
 
   @IsString()
   language?: string
+
+  @ApiPropertyOptional({ enum: ["bland", "gemini"], default: "gemini" })
+
+  @IsOptional()
+
+  @IsIn(["bland", "gemini"])
+  provider?: "bland" | "gemini"
 }
 
 export class SathiTurnQueryDto {
@@ -37,6 +38,18 @@ export class SathiTurnQueryDto {
 
   @MaxLength(8000)
   text?: string
+}
+
+/** A display transcript emitted by the live voice provider. */
+export class SathiTranscriptDto {
+  @ApiProperty({ enum: ["user", "model"], example: "user" })
+  @IsIn(["user", "model"])
+  role: "user" | "model"
+
+  @ApiProperty({ example: "I sent money through UPI." })
+  @IsString()
+  @MaxLength(8000)
+  text: string
 }
 
 export class DeviceContextDto {
@@ -72,7 +85,9 @@ export class DeviceContextDto {
 }
 
 export class SathiSpeechDto {
-  @ApiProperty({ example: "I’m sorry this happened. When did you first notice it?" })
+  @ApiProperty({
+    example: "I’m sorry this happened. When did you first notice it?",
+  })
   @IsString()
   @MaxLength(2000)
   text: string
@@ -82,4 +97,14 @@ export class SathiSpeechDto {
   @IsString()
   @MaxLength(20)
   language?: string
+}
+
+export class CreateSocialPostDto {
+  @ApiProperty({ enum: ["warning", "informational"] })
+  @IsIn(["warning", "informational"])
+  tone: "warning" | "informational"
+
+  @ApiProperty({ enum: ["twitter", "instagram", "whatsapp"] })
+  @IsIn(["twitter", "instagram", "whatsapp"])
+  platform: "twitter" | "instagram" | "whatsapp"
 }

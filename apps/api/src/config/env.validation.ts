@@ -42,9 +42,9 @@ export const envSchema = z.object({
   LLM_API_URL: z
     .string()
     .url()
-    .default("https://api.openai.com/v1/chat/completions"),
+    .default("https://api.groq.com/openai/v1/chat/completions"),
   LLM_API_KEY: z.string().min(1).optional(),
-  LLM_MODEL: z.string().min(1).default("gpt-4o-mini"),
+  LLM_MODEL: z.string().min(1).default("openai/gpt-oss-20b"),
   GEMINI_API_KEY: z.string().min(1).optional(),
   GEMINI_API_URL: z
     .string()

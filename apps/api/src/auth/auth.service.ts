@@ -6,7 +6,7 @@ import {
   UnauthorizedException,
 } from "@nestjs/common"
 import { ConfigService } from "@nestjs/config"
-import { PrismaService } from "../infra/prisma.service"
+import { PrismaService, withDbRetry } from "../infra/prisma.service"
 import { CompleteProfileDto, UpdateOnboardingDto } from "./auth.dto"
 
 export interface AuthUser {
@@ -44,6 +44,15 @@ type SupabaseSession = {
 
 @Injectable()
 export class AuthService {
+  // Every authenticated API call used to round-trip to Supabase Auth and then
+  // to Postgres just to identify the same user. The report save flow makes
+  // several calls in a row, so a short in-memory cache avoids a transient
+  // network/database blip breaking it halfway through.
+  private readonly tokenCache = new Map<
+    string,
+    { user: AuthUser; expiresAt: number }
+  >()
+
   constructor(
     private readonly prisma: PrismaService,
     private readonly config: ConfigService,
@@ -146,6 +155,10 @@ export class AuthService {
   async authenticateAccessToken(accessToken: string): Promise<AuthUser> {
     if (!accessToken)
       throw new UnauthorizedException("A bearer token is required")
+
+    const cached = this.tokenCache.get(accessToken)
+    if (cached && cached.expiresAt > Date.now()) return cached.user
+
     const user = await this.supabaseRequest<SupabaseUser>(
       "/auth/v1/user",
       undefined,
@@ -153,7 +166,35 @@ export class AuthService {
       true,
       accessToken,
     )
-    return this.saveSupabaseUser(user)
+    const profile = await this.saveSupabaseUser(user)
+
+    const expiresAt = Math.min(
+      this.tokenExpiry(accessToken),
+      Date.now() + 60_000,
+    )
+    if (expiresAt > Date.now()) {
+      if (this.tokenCache.size > 500) {
+        for (const [token, entry] of this.tokenCache) {
+          if (entry.expiresAt <= Date.now()) this.tokenCache.delete(token)
+        }
+      }
+      this.tokenCache.set(accessToken, { user: profile, expiresAt })
+    }
+
+    return profile
+  }
+
+  private tokenExpiry(token: string): number {
+    try {
+      const payload = JSON.parse(
+        Buffer.from(token.split(".")[1] ?? "", "base64url").toString("utf8"),
+      ) as { exp?: unknown }
+      return typeof payload.exp === "number"
+        ? payload.exp * 1000
+        : Date.now() + 60_000
+    } catch {
+      return Date.now() + 60_000
+    }
   }
 
   async getProfile(user: AuthUser): Promise<AuthUser> {
@@ -219,7 +260,11 @@ export class AuthService {
     return phoneE164
   }
 
-  private async saveSupabaseUser(user: SupabaseUser): Promise<AuthUser> {
+  private saveSupabaseUser(user: SupabaseUser): Promise<AuthUser> {
+    return withDbRetry(() => this.saveSupabaseUserOnce(user))
+  }
+
+  private async saveSupabaseUserOnce(user: SupabaseUser): Promise<AuthUser> {
     if (!user.id)
       throw new UnauthorizedException(
         "Supabase returned an invalid user record",
@@ -318,18 +363,27 @@ export class AuthService {
       this.config.get<string>("SUPABASE_PUBLISHABLE_KEY") ??
       this.config.getOrThrow<string>("SUPABASE_ANON_KEY")
     let response: Response
-    try {
-      response = await fetch(`${baseUrl}${path}`, {
-        method,
-        headers: {
-          apikey: apiKey,
-          Authorization: `Bearer ${accessToken ?? apiKey}`,
-          ...(body === undefined ? {} : { "Content-Type": "application/json" }),
-        },
-        ...(body === undefined ? {} : { body: JSON.stringify(body) }),
-      })
-    } catch {
-      throw new BadGatewayException("Could not connect to Supabase Auth")
+    const attempts = method === "GET" ? 2 : 1
+    for (let attempt = 0; attempt < attempts; attempt += 1) {
+      try {
+        response = await fetch(`${baseUrl}${path}`, {
+          method,
+          signal: AbortSignal.timeout(10_000),
+          headers: {
+            apikey: apiKey,
+            Authorization: `Bearer ${accessToken ?? apiKey}`,
+            ...(body === undefined
+              ? {}
+              : { "Content-Type": "application/json" }),
+          },
+          ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+        })
+        break
+      } catch {
+        if (attempt === attempts - 1)
+          throw new BadGatewayException("Could not connect to Supabase Auth")
+        await new Promise((resolve) => setTimeout(resolve, 300))
+      }
     }
     if (!response.ok) {
       if (

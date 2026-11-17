@@ -1,8 +1,44 @@
 import { classificationCategories } from "../classification/classification.types"
 
+import { evidenceCategories } from "./case-interactions.dto"
+
 import { sathiChannels } from "./sathi.types"
 
 export const sathiFunctionDeclarations = [
+  {
+    name: "get_case_state",
+
+    description:
+      "Read the latest confirmed fields, extracted evidence fields, pending requests and processing status for this case before asking the next question.",
+
+    parameters: { type: "object", properties: {} },
+  },
+
+  {
+    name: "request_case_evidence",
+
+    description:
+      "Note that the user should upload one supported evidence category. Tell the user to tap the Upload button in this chat; never claim a file picker opened automatically. The backend extracts the fields after upload and returns them to this chat.",
+
+    parameters: {
+      type: "object",
+
+      properties: {
+        category: { type: "string", enum: [...evidenceCategories] },
+      },
+
+      required: ["category"],
+    },
+  },
+
+  {
+    name: "request_case_review",
+
+    description: "Show the user an editable review of the current case revision.",
+
+    parameters: { type: "object", properties: {} },
+  },
+
   {
     name: "save_incident_facts",
 

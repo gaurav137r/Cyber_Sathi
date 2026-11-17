@@ -9,6 +9,7 @@ import { SATHI_AGENT_NAME, buildSathiSystemInstruction } from "./sathi.prompt"
 import { sathiFunctionDeclarations } from "./sathi.tools"
 
 import { SathiFacts, SathiMessage } from "./sathi.types"
+import { KeyPool } from "../ai/key-pool"
 
 type GeminiPart = {
   text?: string
@@ -62,6 +63,17 @@ export type GeminiLiveSession = {
 
   websocketUrl: string
 
+  setupConfig: {
+    sessionResumption: Record<string, never>
+    responseModalities: ["AUDIO"]
+    speechConfig: {
+      voiceConfig: { prebuiltVoiceConfig: { voiceName: string } }
+    }
+    systemInstruction: { parts: Array<{ text: string }> }
+    inputAudioTranscription: Record<string, never>
+    outputAudioTranscription: Record<string, never>
+  }
+
   voiceName: string
 
   expiresAt: string
@@ -75,18 +87,19 @@ export type GeminiLiveSession = {
 
 @Injectable()
 export class GeminiProvider {
-  constructor(private readonly config: ConfigService<AppEnv, true>) {}
+  constructor(
+    private readonly config: ConfigService<AppEnv, true>,
+    private readonly keyPool: KeyPool,
+  ) {}
 
   isConfigured(): boolean {
-    return Boolean(this.config.get("GEMINI_API_KEY", { infer: true }))
+    return Boolean(this.keyPool.isKeyAvailable("gemini"))
   }
 
   async createLiveSession(
     language: string,
     facts: SathiFacts,
   ): Promise<GeminiLiveSession> {
-    const apiKey = this.requireKey()
-
     const model = this.config.get("GEMINI_LIVE_MODEL", { infer: true })
 
     const voiceName = this.config.get("GEMINI_VOICE_NAME", { infer: true })
@@ -96,6 +109,17 @@ export class GeminiProvider {
     const newSessionExpireTime = new Date(
       Date.now() + 2 * 60 * 1000,
     ).toISOString()
+
+    const setupConfig: GeminiLiveSession["setupConfig"] = {
+      sessionResumption: {},
+      responseModalities: ["AUDIO"],
+      speechConfig: { voiceConfig: { prebuiltVoiceConfig: { voiceName } } },
+      systemInstruction: {
+        parts: [{ text: buildSathiSystemInstruction(language, facts) }],
+      },
+      inputAudioTranscription: {},
+      outputAudioTranscription: {},
+    }
 
     const body = {
       uses: 1,
@@ -107,19 +131,7 @@ export class GeminiProvider {
       liveConnectConstraints: {
         model: `models/${model}`,
 
-        config: {
-          sessionResumption: {},
-
-          responseModalities: ["AUDIO"],
-
-          speechConfig: { voiceConfig: { prebuiltVoiceConfig: { voiceName } } },
-
-          systemInstruction: {
-            parts: [{ text: buildSathiSystemInstruction(language, facts) }],
-          },
-
-          tools: [{ functionDeclarations: sathiFunctionDeclarations }],
-        },
+        config: setupConfig,
       },
     }
 
@@ -130,8 +142,6 @@ export class GeminiProvider {
       ["/v1beta/auth_tokens", "/v1alpha/auth_tokens"],
 
       body,
-
-      apiKey,
     )
 
     if (!payload.name) {
@@ -140,7 +150,7 @@ export class GeminiProvider {
       )
     }
 
-    const websocketUrl = `${this.wsBaseUrl()}/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent`
+    const websocketUrl = `${this.wsBaseUrl()}/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContentConstrained`
 
     return {
       ephemeralToken: payload.name,
@@ -148,6 +158,8 @@ export class GeminiProvider {
       model,
 
       websocketUrl,
+
+      setupConfig,
 
       voiceName,
 
@@ -170,9 +182,28 @@ export class GeminiProvider {
 
     userParts: GeminiPart[]
   }): Promise<GeminiTurnResult> {
-    const apiKey = this.requireKey()
+    const chatModel = this.config.get("GEMINI_CHAT_MODEL", { infer: true })
 
-    const model = this.config.get("GEMINI_TEXT_MODEL", { infer: true })
+    const chatFallback = this.config.get("GEMINI_CHAT_FALLBACK", { infer: true })
+
+    const primaryModel = this.config.get("GEMINI_TEXT_MODEL", { infer: true })
+
+    const fallbackModel = this.config.get("GEMINI_TEXT_FALLBACK", { infer: true })
+
+    // Prefer the lite chat models: the interactive reply is one or two short
+    // sentences, and the full Flash model spends 10-25s on hidden thinking.
+    const models = [
+      ...new Set(
+        [
+          chatModel,
+          chatFallback,
+          primaryModel,
+          fallbackModel,
+          "gemini-3.1-flash-lite",
+          "gemini-3.5-flash-lite",
+        ].filter((model): model is string => Boolean(model)),
+      ),
+    ]
 
     const contents: GeminiContent[] = [
       ...input.history.map((message) => ({
@@ -183,13 +214,33 @@ export class GeminiProvider {
       { role: "user", parts: input.userParts },
     ]
 
+    const latestUserText = input.userParts
+      .map((part) => ("text" in part ? (part as { text?: string }).text : "") || "")
+      .join(" ")
+      .trim()
+      .slice(0, 500)
+
+    const languageLabel =
+      input.language === "hi"
+        ? "Hindi (Devanagari script)"
+        : input.language === "hinglish"
+          ? "Hinglish (Hindi + English in Roman script, e.g. 'kya hua', 'main samajh gaya')"
+          : "English"
+
     const payload = await this.postJson<GeminiResponse>(
-      [`/v1beta/models/${model}:generateContent`],
+      models.map((candidate) => `/v1beta/models/${encodeURIComponent(candidate)}:generateContent`),
 
       {
         systemInstruction: {
           parts: [
             { text: buildSathiSystemInstruction(input.language, input.facts) },
+            ...(latestUserText
+              ? [
+                  {
+                    text: `CRITICAL LANGUAGE RULE: The user's latest message was: "${latestUserText}". This is ${languageLabel}. You MUST reply in the EXACT SAME language/style. If Hinglish → reply in Hinglish (use "aap", mix Hindi verbs + English nouns). If Hindi → reply in Devanagari Hindi. If English → reply in English. NEVER default to English.`,
+                  },
+                ]
+              : []),
           ],
         },
 
@@ -197,10 +248,8 @@ export class GeminiProvider {
 
         tools: [{ functionDeclarations: sathiFunctionDeclarations }],
 
-        generationConfig: { temperature: 0.3 },
+        generationConfig: { temperature: 0.3, maxOutputTokens: 512 },
       },
-
-      apiKey,
     )
 
     const parts = payload.candidates?.[0]?.content?.parts ?? []
@@ -267,7 +316,6 @@ export class GeminiProvider {
           ],
         },
       },
-      this.requireKey(),
     )
 
     const audio =
@@ -286,15 +334,6 @@ export class GeminiProvider {
     return audio
   }
 
-  private requireKey(): string {
-    const apiKey = this.config.get("GEMINI_API_KEY", { infer: true })
-
-    if (!apiKey)
-      throw new ServiceUnavailableException("GEMINI_API_KEY is not configured")
-
-    return apiKey
-  }
-
   private apiBaseUrl(): string {
     return this.config
       .get("GEMINI_API_URL", { infer: true })
@@ -308,33 +347,46 @@ export class GeminiProvider {
   private async postJson<T,>(
     paths: string[],
     body: unknown,
-    apiKey: string,
+    totalTimeoutMs = 60_000,
   ): Promise<T> {
-    let lastError = "Gemini request failed"
+    const deadline = Date.now() + totalTimeoutMs
+    return this.keyPool.withFailover(async (apiKey) => {
+      let lastError = "Gemini request failed"
 
-    for (const path of paths) {
-      const response = await fetch(`${this.apiBaseUrl()}${path}`, {
-        method: "POST",
+      for (const path of paths) {
+        const remaining = deadline - Date.now()
+        if (remaining <= 2_000) break
+        let response: Response
+        try {
+          response = await fetch(`${this.apiBaseUrl()}${path}`, {
+            method: "POST",
+            signal: AbortSignal.timeout(Math.min(30_000, remaining)),
+            headers: {
+              "Content-Type": "application/json",
+              "x-goog-api-key": apiKey,
+            },
+            body: JSON.stringify(body),
+          })
+        } catch (error) {
+          lastError = `Gemini request failed: ${
+            error instanceof Error ? error.message : String(error)
+          }`
+          continue
+        }
 
-        headers: {
-          "Content-Type": "application/json",
-          "x-goog-api-key": apiKey,
-        },
+        const payload = (await response.json().catch(() => ({}))) as T & {
+          error?: { message?: string }
+        }
 
-        body: JSON.stringify(body),
-      })
+        if (response.ok) return payload
 
-      const payload = (await response.json().catch(() => ({}))) as T & {
-        error?: { message?: string }
+        lastError = `Gemini request failed with HTTP ${response.status}: ${
+          (payload as { error?: { message?: string } })?.error?.message ??
+          JSON.stringify(payload).slice(0, 300)
+        }`
       }
 
-      if (response.ok) return payload
-
-      lastError =
-        payload.error?.message ??
-        `Gemini request failed with HTTP ${response.status}`
-    }
-
-    throw new ServiceUnavailableException(lastError)
+      throw new ServiceUnavailableException(lastError)
+    })
   }
 }

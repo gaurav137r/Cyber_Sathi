@@ -15,6 +15,10 @@ import {
 import { classificationOutputSchema } from "./classification.types"
 import { filingRoutes } from "./routing.config"
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value)
+}
+
 @Injectable()
 export class ClassificationOrchestrator {
   constructor(
@@ -24,7 +28,11 @@ export class ClassificationOrchestrator {
     private readonly classifier: ClassificationService,
   ) {}
 
-  async classify(caseId: string, user: AuthUser, requestId?: string) {
+  async classify(
+    caseId: string,
+    user: Pick<AuthUser, "id">,
+    requestId?: string,
+  ) {
     const foundCase = await this.prisma.case.findFirst({
       where: { id: caseId, userId: user.id },
       include: { evidenceItems: true },
@@ -42,14 +50,43 @@ export class ClassificationOrchestrator {
     const threshold = this.config.getOrThrow<number>(
       "CLASSIFICATION_CONFIDENCE_THRESHOLD",
     )
+    const currentFields = isRecord(foundCase.structuredFields)
+      ? foundCase.structuredFields
+      : {}
+    const confirmedFields = isRecord(currentFields.confirmedFields)
+      ? currentFields.confirmedFields
+      : {}
+    const hasConfirmedCategory =
+      typeof confirmedFields.category === "string" &&
+      confirmedFields.category in filingRoutes &&
+      confirmedFields.category !== "UNCERTAIN"
     const needsClarification =
-      result.confidence < threshold || result.category === "UNCERTAIN"
-    const category = needsClarification ? "UNCERTAIN" : result.category
+      !hasConfirmedCategory &&
+      (result.confidence < threshold || result.category === "UNCERTAIN")
+    const category = hasConfirmedCategory
+      ? (confirmedFields.category as keyof typeof filingRoutes)
+      : needsClarification
+        ? "UNCERTAIN"
+        : result.category
     const route = filingRoutes[category]
+    const extractedCandidates = isRecord(currentFields.extractedCandidates)
+      ? currentFields.extractedCandidates
+      : {}
+    const safeExtractedFields = Object.fromEntries(
+      Object.entries(result.extractedFields).filter(
+        ([field]) => !Object.prototype.hasOwnProperty.call(confirmedFields, field),
+      ),
+    )
     const structuredFields = {
-      ...foundCase.structuredFields as Record<string, unknown>,
-      ...result.extractedFields,
+      ...currentFields,
+      ...safeExtractedFields,
+      extractedCandidates: {
+        ...extractedCandidates,
+        ...result.extractedFields,
+      },
+      confirmedFields,
     }
+
     const updated = await this.prisma.case.update({
       where: { id: caseId },
       data: {
@@ -57,6 +94,7 @@ export class ClassificationOrchestrator {
         categoryConfidence: result.confidence,
         classificationExplanation: result.explanation,
         clarificationRequired: needsClarification,
+        needsHuman: needsClarification,
         filingDestination: route.destinationName,
         structuredFields: structuredFields as Prisma.InputJsonValue,
         ...(needsClarification ? {} : { status: CaseStatus.CLASSIFIED }),
@@ -81,6 +119,15 @@ export class ClassificationOrchestrator {
       route,
       clarificationRequired: needsClarification,
     }
+  }
+
+  async classifyFromWebhook(caseId: string) {
+    const foundCase = await this.prisma.case.findUnique({
+      where: { id: caseId },
+      select: { userId: true },
+    })
+    if (!foundCase) throw new NotFoundException(`Case ${caseId} was not found`)
+    return this.classify(caseId, { id: foundCase.userId })
   }
 
   async completeClarification(

@@ -57,11 +57,82 @@ pnpm start:dev
 - API: http://localhost:3000
 - Health: http://localhost:3000/health
 - Swagger: http://localhost:3000/api/docs
-- MinIO console: http://localhost:9001 (`minioadmin` / `minioadmin`)
 
 Hot-reload the API on the host with `pnpm start:dev` (it talks to Compose Postgres/Redis/MinIO). To run the API in a container as well: `pnpm compose:up:all`.
 
 Frontend prototype: `pnpm dev`.
+
+### Test microphone locally
+
+- On a computer, open `http://localhost:8443` directly in Chrome or Edge. Do
+  not use an embedded preview frame; browser microphone access requires a
+  secure context, and localhost is treated as secure.
+- On a USB-connected Android device with USB debugging enabled, run
+  `adb reverse tcp:8443 tcp:8443` and `adb reverse tcp:3000 tcp:3000`, then
+  start the mobile app with
+  `pnpm mobile:start`. The Android WebView uses `http://localhost:8443` by
+  default, which reaches the computer through the reverse port and qualifies
+  as a secure context. Accept the Android microphone permission when prompted.
+  If `EXPO_PUBLIC_WEB_URL` is set, set it to `http://localhost:8443` for this
+  test or unset it.
+- Start a report, accept the third-party processing notice, then use the Bland
+  widget's chat or voice option. Browser voice requires microphone permission.
+- To resume, open **My Cases**, choose the case, and select **Resume Sathi
+  conversation**. Bland's configured conversation timeout is 30 days.
+
+### Saathi voice, text, and evidence
+
+Voice uses the Bland web widget; typed chat uses the authenticated Sathi text
+service and the project's KeyPool. Both update the same case record, while
+their conversation histories remain separate. Set `VITE_BLAND_WIDGET_ID` in
+the frontend environment and `BLAND_API_KEY` plus the same `BLAND_WIDGET_ID` in
+the API environment. The Bland API key must remain server-side. The widget uses
+the case ID as its visitor ID so returning to that case can resume its voice
+conversation; the configured widget conversation timeout is 30 days. Use **My
+Cases → Case Tracking → Resume Sathi conversation** to reopen a saved intake.
+
+For Bland's post-call webhook, set `BLAND_WEBHOOK_SECRET` in `apps/api/.env` to
+the signing secret from Bland Account Settings → Keys. The public receiver is
+`POST /bland/webhook`; verify the API is reachable over HTTPS before pasting its
+full URL into Bland's webhook field.
+
+#### Stable Bland agent voice
+
+Voice is an **agent setting**, not a per-session request variable. The Saathi
+agent must pin a single BTTS_V3 voice, otherwise Bland can fall back to a
+different or unset voice between turns. The repository default is **AAVY**
+(`c8bfeab1-1844-4d0f-9c46-acb011d7e99c`), a soothing, smooth, calm, and consoling
+Hindi/Indian accent BTTS_V3 voice with a warm, friendly, reassuring tone suited for comforting
+fraud victims (alternative calm Indian female voice: **Vibha** `791bba5c-f36d-4f15-8b63-ceffffc19fea`). To apply it to the agent,
+publish it to staging, and promote it to production:
+
+```bash
+pnpm --filter @cybersathi/api bland:configure
+```
+
+The command is idempotent; use `-- --dry-run` to preview or `-- --voice=<uuid>`
+to select another v3 voice. On boot the API verifies the agent's production
+voice and logs a warning if it has drifted. Do not send `voice` inside the
+session `request_data`; it is not a voice override.
+
+Typed replies use Gemini TTS only when a Bland voice call is **not** active.
+While the live call is connected, Bland speaks the agent turns and the browser
+TTS is suppressed so two voices never overlap.
+
+When deploying, add the deployed frontend hostname to the widget's allowed
+domains in the Bland dashboard/API. The currently provisioned widget allows
+`localhost` and `127.0.0.1` for local testing.
+
+Supported evidence is uploaded to private Supabase Storage and processed by the
+API in the background. Extracted values are candidates, not verified facts;
+review and confirm the case before generating a report. The UI asks the user to
+signal when a typed value is saved because the app does not inject it into a
+running Bland conversation. Direct Bland text chat and Bland tool registration
+remain unavailable until their API and trusted tool-authentication contracts
+are verified; see `docs/saathi-tool-contracts.md`. Voice and evidence processing
+involve third-party services; the app cannot guarantee provider retention,
+deletion, or training policies. Never share OTPs, PINs, passwords, CVV, full
+card numbers, or government-ID numbers.
 
 ### Supabase Auth and database
 

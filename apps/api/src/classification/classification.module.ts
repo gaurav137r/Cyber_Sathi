@@ -14,5 +14,6 @@ import { ClassificationOrchestrator } from "./classification.service"
       useExisting: OpenAiClassificationProvider,
     },
   ],
+  exports: [ClassificationOrchestrator],
 })
 export class ClassificationModule {}

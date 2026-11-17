@@ -2,6 +2,7 @@ import { Inject, Injectable, ServiceUnavailableException } from "@nestjs/common"
 import { ConfigService } from "@nestjs/config"
 import { SpeechResult, SpeechService } from "./speech-provider"
 import { TextToSpeechResult, TextToSpeechService } from "./tts-provider"
+import { KeyPool } from "../ai/key-pool"
 
 type BhashiniResponse = {
   response?: Array<{
@@ -13,27 +14,33 @@ type BhashiniResponse = {
 
 @Injectable()
 export class BhashiniProvider implements SpeechService, TextToSpeechService {
-  constructor(private readonly config: ConfigService) {}
+  constructor(
+    private readonly config: ConfigService,
+    private readonly keyPool: KeyPool,
+  ) {}
 
   async transcribe(audio: Buffer, languageHint = "en"): Promise<SpeechResult> {
     const detectedLanguage = languageHint || "en"
-    const asr = await this.callPipeline({
-      pipelineTasks: [
-        {
-          taskType: "asr",
-          config: {
-            language: { sourceLanguage: detectedLanguage },
-            serviceId: this.config.getOrThrow<string>(
-              "BHASHINI_ASR_SERVICE_ID",
-            ),
-            audioFormat: "wav",
-            samplingRate: 16000,
-          },
-        },
-      ],
-      inputData: { audio: [{ audioContent: audio.toString("base64") }] },
+    const transcript = await this.keyPool.withProvider("groq", async (apiKey) => {
+      const form = new FormData()
+      form.append("model", this.config.getOrThrow<string>("GROQ_WHISPER_MODEL"))
+      form.append("response_format", "json")
+      if (detectedLanguage) form.append("language", detectedLanguage.split("-")[0])
+      form.append("file", new Blob([new Uint8Array(audio)], { type: "audio/wav" }), "evidence.wav")
+      const base = this.config.get<string>("GROQ_API_URL", "https://api.groq.com/openai/v1")!.replace(/\/+$/, "")
+      const response = await fetch(`${base}/audio/transcriptions`, {
+        method: "POST",
+        headers: { Authorization: `Bearer ${apiKey}` },
+        body: form,
+        signal: AbortSignal.timeout(90_000),
+      })
+      if (!response.ok)
+        throw new ServiceUnavailableException(`Groq transcription failed with HTTP ${response.status}`)
+      const payload = await response.json() as { text?: string }
+      if (!payload.text?.trim())
+        throw new ServiceUnavailableException("Groq returned no transcript")
+      return payload.text.trim()
     })
-    const transcript = this.readText(asr)
     const canonicalTranscript = detectedLanguage.toLowerCase().startsWith("en")
       ? transcript
       : this.readText(

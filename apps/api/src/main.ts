@@ -7,7 +7,10 @@ import { AppModule } from "./app.module"
 import type { AppEnv } from "./config/env.schema"
 
 async function bootstrap() {
-  const app = await NestFactory.create(AppModule, { bufferLogs: true })
+  const app = await NestFactory.create(AppModule, {
+    bufferLogs: true,
+    rawBody: true,
+  })
   app.useLogger(app.get(Logger))
   app.useGlobalPipes(
     new ValidationPipe({
