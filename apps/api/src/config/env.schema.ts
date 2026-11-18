@@ -21,13 +21,13 @@ export const envSchema = z
     CORS_ORIGINS: z
       .string()
       .default("http://localhost:8443,http://127.0.0.1:8443"),
-    REDIS_HOST: z.string().min(1),
+    REDIS_HOST: z.string().optional().default("localhost"),
     REDIS_PORT: z.coerce.number().int().positive().default(6379),
-    MINIO_ENDPOINT: z.string().min(1),
+    MINIO_ENDPOINT: z.string().optional().default("localhost"),
     MINIO_PORT: z.coerce.number().int().positive().default(9000),
-    MINIO_ACCESS_KEY: z.string().min(1),
-    MINIO_SECRET_KEY: z.string().min(1),
-    MINIO_BUCKET: z.string().min(1),
+    MINIO_ACCESS_KEY: z.string().optional().default(""),
+    MINIO_SECRET_KEY: z.string().optional().default(""),
+    MINIO_BUCKET: z.string().optional().default("cybersathi-evidence"),
     MINIO_USE_SSL: z
       .union([z.boolean(), z.enum(["true", "false"])])
       .transform((value) => value === true || value === "true")

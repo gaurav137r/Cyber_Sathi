@@ -1,5 +1,5 @@
 import { Module } from "@nestjs/common"
-import { ConfigModule, ConfigService } from "@nestjs/config"
+import { ConfigModule } from "@nestjs/config"
 import { LoggerModule } from "nestjs-pino"
 import { randomUUID } from "node:crypto"
 import { CaseModule } from "./cases/case.module"
@@ -7,7 +7,6 @@ import { AuthModule } from "./auth/auth.module"
 import { EvidenceModule } from "./evidence/evidence.module"
 import { SathiModule } from "./sathi/sathi.module"
 import { VoiceModule } from "./voice/voice.module"
-import type { AppEnv } from "./config/env.schema"
 import { validateEnv } from "./config/env.schema"
 import { HealthModule } from "./health/health.module"
 import { PrismaModule } from "./prisma/prisma.module"
@@ -16,7 +15,6 @@ import { ImagesModule } from "./images/images.module"
 import { KeyPoolModule } from "./ai/key-pool.module"
 import { SupabaseStorageModule } from "./storage/storage.module"
 import { ProfileModule } from "./profile/profile.module"
-import { BullModule } from "@nestjs/bullmq"
 
 @Module({
   imports: [
@@ -25,16 +23,6 @@ import { BullModule } from "@nestjs/bullmq"
       cache: true,
       envFilePath: [".env.local", ".env", "../.env", ".env"],
       validate: validateEnv,
-    }),
-    BullModule.forRootAsync({
-      imports: [ConfigModule],
-      inject: [ConfigService],
-      useFactory: (config: ConfigService<AppEnv, true>) => ({
-        connection: {
-          host: config.get("REDIS_HOST", { infer: true }),
-          port: config.get("REDIS_PORT", { infer: true }),
-        },
-      }),
     }),
     LoggerModule.forRoot({
       pinoHttp: {
