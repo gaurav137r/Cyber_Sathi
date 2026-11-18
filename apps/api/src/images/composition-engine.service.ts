@@ -3,6 +3,7 @@ import {
   InternalServerErrorException,
   Logger,
   OnModuleInit,
+  ServiceUnavailableException,
 } from "@nestjs/common"
 import { execFile } from "node:child_process"
 import { promises as fs } from "node:fs"
@@ -56,13 +57,24 @@ export interface CompositionResult {
 @Injectable()
 export class CompositionEngineService implements OnModuleInit {
   private readonly logger = new Logger(CompositionEngineService.name)
+  private compositionReady = false
 
   constructor(private readonly config: ImagesConfigService) {}
 
   async onModuleInit(): Promise<void> {
     if (this.config.provider === "disabled") return
-    await this.verifyImageMagick()
-    await this.verifyFonts()
+    try {
+      await this.verifyImageMagick()
+      await this.verifyFonts()
+      this.compositionReady = true
+    } catch (error) {
+      this.logger.warn(
+        JSON.stringify({
+          event: "images.composition.unavailable",
+          reason: error instanceof Error ? error.message : String(error),
+        }),
+      )
+    }
   }
 
   private async verifyImageMagick(): Promise<void> {
@@ -118,6 +130,11 @@ export class CompositionEngineService implements OnModuleInit {
 
   async render(request: CompositionRequest): Promise<CompositionResult> {
     const startedAt = Date.now()
+    if (!this.compositionReady) {
+      throw new ServiceUnavailableException(
+        "Poster composition is unavailable because ImageMagick or the required fonts are missing. Other API features remain available.",
+      )
+    }
     if (!request.background || request.background.length < 64) {
       throw new InternalServerErrorException(
         "No background image was supplied to the composition engine.",
