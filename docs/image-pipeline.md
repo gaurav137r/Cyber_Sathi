@@ -53,6 +53,11 @@ sudo dnf install ImageMagick dejavu-sans-fonts python3 curl
 sudo dnf install google-noto-sans-devanagari-fonts
 ```
 
+For Render, deploy the API with the Docker runtime using
+`apps/api/Dockerfile` and the repository root as the build context. The runtime
+image installs ImageMagick 7, DejaVu Sans, and Noto Sans Devanagari, and checks
+the executable and font paths during the image build.
+
 Verify the renderer and fonts:
 
 ```bash
