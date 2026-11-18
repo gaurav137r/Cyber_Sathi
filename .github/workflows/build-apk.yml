@@ -82,6 +82,20 @@ jobs:
             -Pandroid.injected.signing.key.alias="$KEY_ALIAS" \
             -Pandroid.injected.signing.key.password="$KEY_PASSWORD"
 
+      - name: Validate signed release APK
+        working-directory: apps/mobile
+        run: |
+          APK="$(find android/app/build/outputs/apk/release -name '*.apk' -print -quit)"
+          test -n "$APK"
+          APK_SIGNER="$(find "$ANDROID_HOME/build-tools" -name apksigner -type f | sort -V | tail -1)"
+          AAPT="$(find "$ANDROID_HOME/build-tools" -name aapt -type f | sort -V | tail -1)"
+          test -n "$APK_SIGNER"
+          test -n "$AAPT"
+          "$APK_SIGNER" verify --verbose --print-certs "$APK"
+          BADGING="$("$AAPT" dump badging "$APK")"
+          printf '%s\n' "$BADGING" | grep -F "package: name='com.cybersathi.app'"
+          printf '%s\n' "$BADGING" | grep -F "versionCode='2'"
+
       - name: Upload APK artifact
         uses: actions/upload-artifact@v4
         with:
