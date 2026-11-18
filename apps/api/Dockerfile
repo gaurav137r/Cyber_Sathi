@@ -3,6 +3,7 @@ RUN corepack enable && corepack prepare pnpm@10.34.3 --activate
 WORKDIR /repo
 COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
 COPY apps/api/package.json apps/api/package.json
+COPY apps/api/prisma apps/api/prisma
 RUN pnpm install --frozen-lockfile --filter @cybersathi/api...
 
 FROM node:22-alpine3.22 AS build
