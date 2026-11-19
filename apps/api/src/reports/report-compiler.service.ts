@@ -1,5 +1,5 @@
 import { ConflictException, Injectable, NotFoundException } from "@nestjs/common"
-import { Prisma, ReportKind } from "@prisma/client"
+import { CaseStatus, Prisma, ReportKind } from "@prisma/client"
 import { AuthUser } from "../auth/auth.service"
 import { PrismaService } from "../infra/prisma.service"
 import { ConfigService } from "@nestjs/config"
@@ -150,6 +150,34 @@ export class ReportCompilerService {
         metadata: { requestId, reportVersionId: report.id },
       },
     })
+
+    // Advance the case status through the state machine when a final report
+    // is compiled (open → … → close).
+    const advance: Record<string, CaseStatus | null> = {
+      [CaseStatus.DRAFT]: CaseStatus.PROCESSING,
+      [CaseStatus.PROCESSING]: CaseStatus.CLASSIFIED,
+      [CaseStatus.CLASSIFIED]: CaseStatus.REVIEWED,
+      [CaseStatus.REVIEWED]: CaseStatus.FILED,
+      [CaseStatus.FILED]: CaseStatus.RESOLVED,
+      [CaseStatus.RESOLVED]: null,
+      [CaseStatus.ARCHIVED]: null,
+    }
+    const nextStatus = advance[foundCase.status]
+    if (nextStatus) {
+      await this.prisma.case.update({
+        where: { id: caseId },
+        data: { status: nextStatus },
+      })
+      await this.prisma.auditLogEntry.create({
+        data: {
+          caseId,
+          actorUserId: user.id,
+          action: "CASE_STATUS_ADVANCED",
+          metadata: { from: foundCase.status, to: nextStatus, reason: "Final report compiled" },
+        },
+      })
+    }
+
     return report
   }
 

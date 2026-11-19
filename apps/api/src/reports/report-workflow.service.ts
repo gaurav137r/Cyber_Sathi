@@ -83,7 +83,7 @@ export class ReportWorkflowService {
         socialPosts: {
           orderBy: [{ createdAt: "desc" }],
           take: 20,
-          select: { id: true, platform: true, caption: true, hashtags: true, createdAt: true },
+          select: { id: true, platform: true, caption: true, hashtags: true, imageUrl: true, createdAt: true },
         },
       },
     })

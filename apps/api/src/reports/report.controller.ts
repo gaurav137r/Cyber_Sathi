@@ -130,6 +130,18 @@ export class ReportController {
     }
 
     const poster = await this.instagramPoster.generatePoster(input)
+
+    // Persist the poster so previously generated posters are retrievable
+    await this.workflow["prisma"].socialPost.create({
+      data: {
+        caseId: id,
+        platform: "instagram",
+        caption: body.keyMessage,
+        hashtags: [],
+        imageUrl: poster.imageUrl,
+      },
+    })
+
     return { caseId: id, ...poster }
   }
 
