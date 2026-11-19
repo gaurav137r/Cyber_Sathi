@@ -84,18 +84,25 @@ export class CompositionEngineService implements OnModuleInit {
       })
       const firstLine = stdout.split(/\r?\n/)[0]?.trim() ?? ""
       if (!/ImageMagick\s+7/i.test(firstLine)) {
-        throw new Error(
-          `ImageMagick 7 is required, but the server reported: ${firstLine || "unknown version"}`,
+        this.logger.warn(
+          JSON.stringify({
+            event: "images.imagemagick.unavailable",
+            reason: `ImageMagick 7 is required, but the server reported: ${firstLine || "unknown version"}`,
+          }),
         )
+        return
       }
       this.logger.log(
         JSON.stringify({ event: "images.imagemagick.ready", version: firstLine }),
       )
     } catch (error) {
-      throw new Error(
-        `ImageMagick 7 is required for poster composition but was not found. Install it with "sudo dnf install ImageMagick dejavu-sans-fonts" and restart the API. ${
-          error instanceof Error ? error.message : ""
-        }`.trim(),
+      this.logger.warn(
+        JSON.stringify({
+          event: "images.imagemagick.unavailable",
+          reason: `ImageMagick 7 is required for poster composition but was not found. ${
+            error instanceof Error ? error.message : ""
+          }`.trim(),
+        }),
       )
     }
   }
