@@ -2,17 +2,11 @@
 
 # <img src="assets/logo.png" width="500" valign="middle"/>
 
-![Status](https://img.shields.io/badge/STATUS-Prototype%20%2F%20Testing-yellow)
-![Frontend](https://img.shields.io/badge/Frontend-React%20%2B%20Vite-blue)
-![Backend](https://img.shields.io/badge/Backend-NestJS-red)
-![Database](https://img.shields.io/badge/Database-PostgreSQL-blue)
-![ORM](https://img.shields.io/badge/ORM-Prisma-black)
-![Voice](https://img.shields.io/badge/Voice-Bland%20AI-purple)
-![Auth](https://img.shields.io/badge/Auth-Supabase-green)
-![Storage](https://img.shields.io/badge/Storage-Supabase%20%2F%20MinIO-lightgrey)
-![Hosting](https://img.shields.io/badge/Hosting-Render%20%2B%20Cloudflare%20Pages-orange)
+![Status](https://img.shields.io/badge/STATUS-Prototype%20%2F%20Testing-yellow) ![Frontend](https://img.shields.io/badge/Frontend-React%20%2B%20Vite-blue) ![Backend](https://img.shields.io/badge/Backend-NestJS-red) ![Database](https://img.shields.io/badge/Database-PostgreSQL-blue)
+![ORM](https://img.shields.io/badge/ORM-Prisma-black) ![Voice](https://img.shields.io/badge/Voice-Bland%20AI-purple) ![Auth](https://img.shields.io/badge/Auth-Supabase-green)
+![Storage](https://img.shields.io/badge/Storage-Supabase%20%2F%20MinIO-lightgrey) ![Hosting](https://img.shields.io/badge/Hosting-Render%20%2B%20Cloudflare%20Pages-orange)
 
-<br/>
+<br/>t
 
 [Purpose](#purpose--aim) · [Features](#features) · [Quickstart](#quickstart) · [Tech Stack](#tech-stack) · [Data Notice](#data--third-party-notice) · [Security](#security)
 
