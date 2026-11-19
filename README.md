@@ -1,15 +1,28 @@
-# 🛡️ Cyber Sathi
+<div align="center">
 
-> **Cyber fraud reporting companion for India — bilingual (English/Hindi), voice-first.**
+# <img src="assets/logo.png" width="65" valign="middle"/> Cyber Sathi
 
-| Tag | Value |
-| --- | --- |
-| **Status** | Prototype / Testing |
-| **Frontend** | React + Vite (root) |
-| **Backend** | NestJS (`apps/api`) |
-| **Database** | PostgreSQL + Prisma |
-| **Deployment** | Render (API) · Cloudflare Pages (frontend) |
-| **License** | Private |
+---
+
+![Status](https://img.shields.io/badge/STATUS-Prototype%20%2F%20Testing-yellow)
+![Frontend](https://img.shields.io/badge/Frontend-React%20%2B%20Vite-blue)
+![Backend](https://img.shields.io/badge/Backend-NestJS-red)
+![Database](https://img.shields.io/badge/Database-PostgreSQL-blue)
+![ORM](https://img.shields.io/badge/ORM-Prisma-black)
+![Voice](https://img.shields.io/badge/Voice-Bland%20AI-purple)
+![Auth](https://img.shields.io/badge/Auth-Supabase-green)
+![Storage](https://img.shields.io/badge/Storage-Supabase%20%2F%20MinIO-lightgrey)
+![Hosting](https://img.shields.io/badge/Hosting-Render%20%2B%20Cloudflare%20Pages-orange)
+
+<br/>
+
+[Purpose](#purpose--aim) · [Features](#features) · [Quickstart](#quickstart) · [Tech Stack](#tech-stack) · [Data Notice](#data--third-party-notice) · [Security](#security)
+
+<br/>
+
+*Bilingual (English/Hindi) voice-first companion for reporting cyber fraud in India. A testing/demonstration project showing how a victim can move from reporting to action.*
+
+</div>
 
 ---
 
