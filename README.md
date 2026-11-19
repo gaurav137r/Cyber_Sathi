@@ -1,6 +1,6 @@
 <div align="center">
 
-# <img src="assets/logo.png" width="300" valign="middle"/>
+# <img src="assets/logo.png" width="500" valign="middle"/>
 
 ![Status](https://img.shields.io/badge/STATUS-Prototype%20%2F%20Testing-yellow)
 ![Frontend](https://img.shields.io/badge/Frontend-React%20%2B%20Vite-blue)
