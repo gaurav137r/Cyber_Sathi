@@ -1,6 +1,6 @@
 <div align="center">
 
-# <img src="assets/logo.png" width="65" valign="middle"/> Cyber Sathi
+# <img src="assets/logo.png" width="600" valign="middle"/>
 
 ---
 
