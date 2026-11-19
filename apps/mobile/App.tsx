@@ -3,38 +3,27 @@ import Constants from "expo-constants"
 import { useRef } from "react"
 
 import {
+  ActivityIndicator,
+  Image,
   PermissionsAndroid,
   Platform,
-  SafeAreaView,
+  Pressable,
   StyleSheet,
   Text,
   View,
 } from "react-native"
 import { WebView } from "react-native-webview"
 
+const productionWebUrl = "https://cyber-sathi-frontend.onrender.com"
+const configuredWebUrl = process.env.EXPO_PUBLIC_WEB_URL?.trim()
 const expoHost = Constants.expoConfig?.hostUri?.split(":")[0]
 
 const appUrl =
-  (globalThis as { process?: { env?: Record<string, string | undefined> } })
-    .process?.env?.EXPO_PUBLIC_WEB_URL ??
-  (expoHost
-    ? `http://${expoHost}:8443`
-    : null)
+  configuredWebUrl ||
+  (__DEV__ && expoHost ? `http://${expoHost}:8443` : productionWebUrl)
 
 export default function App() {
   const webViewRef = useRef<WebView<any>>(null)
-
-  if (!appUrl) {
-    return (
-      <SafeAreaView style={styles.message}>
-        <Text style={styles.title}>Cyber Sathi</Text>
-        <Text>
-          Start the Expo app on your local network to connect to the web
-          preview.
-        </Text>
-      </SafeAreaView>
-    )
-  }
 
   const handlePermissionResult = (granted: boolean) => {
     webViewRef.current?.injectJavaScript(
@@ -96,6 +85,29 @@ export default function App() {
         domStorageEnabled
         mediaPlaybackRequiresUserGesture={false}
         allowsInlineMediaPlayback
+        startInLoadingState
+        renderLoading={() => (
+          <View style={styles.splash}>
+            <Image source={require("./assets/icon.png")} style={styles.logo} />
+            <Text style={styles.title}>Cyber Sathi</Text>
+            <ActivityIndicator color="#7FD1C0" />
+          </View>
+        )}
+        renderError={() => (
+          <View style={styles.message}>
+            <Image source={require("./assets/icon.png")} style={styles.logo} />
+            <Text style={styles.title}>Unable to load Cyber Sathi</Text>
+            <Text style={styles.messageText}>
+              Check your internet connection and try again.
+            </Text>
+            <Pressable
+              onPress={() => webViewRef.current?.reload()}
+              style={styles.retry}
+            >
+              <Text style={styles.retryText}>Try again</Text>
+            </Pressable>
+          </View>
+        )}
         onMessage={handleWebViewMessage}
       />
     </View>
@@ -107,12 +119,38 @@ const styles = StyleSheet.create({
 
   webview: { flex: 1 },
 
+  splash: {
+    ...StyleSheet.absoluteFill,
+    alignItems: "center",
+    justifyContent: "center",
+    backgroundColor: "#0B2E2E",
+  },
+
+  logo: { width: 120, height: 120, marginBottom: 16 },
+
   message: {
     flex: 1,
     justifyContent: "center",
+    alignItems: "center",
     padding: 24,
-    backgroundColor: "#F4F5F3",
+    backgroundColor: "#0B2E2E",
   },
 
-  title: { marginBottom: 8, fontSize: 22, fontWeight: "700", color: "#0B2E2E" },
+  title: {
+    marginBottom: 16,
+    fontSize: 22,
+    fontWeight: "700",
+    color: "#FFFFFF",
+  },
+
+  messageText: { marginBottom: 20, color: "#FFFFFF", textAlign: "center" },
+
+  retry: {
+    borderRadius: 24,
+    paddingHorizontal: 20,
+    paddingVertical: 12,
+    backgroundColor: "#146B66",
+  },
+
+  retryText: { color: "#FFFFFF", fontWeight: "700" },
 })

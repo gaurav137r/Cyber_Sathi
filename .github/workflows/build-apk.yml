@@ -71,7 +71,7 @@ jobs:
           KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
         run: |
           test -n "$EXPO_PUBLIC_WEB_URL" || { echo "Missing EXPO_PUBLIC_WEB_URL repository variable"; exit 1; }
-          case "$EXPO_PUBLIC_WEB_URL" in https://*) ;; *) echo "EXPO_PUBLIC_WEB_URL must use HTTPS for microphone access"; exit 1 ;; esac
+          test "$EXPO_PUBLIC_WEB_URL" = "https://cyber-sathi-frontend.onrender.com" || { echo "EXPO_PUBLIC_WEB_URL must point to the production frontend"; exit 1; }
           test -n "$KEYSTORE_PASSWORD" || { echo "Missing KEYSTORE_PASSWORD repository secret"; exit 1; }
           test -n "$KEY_ALIAS" || { echo "Missing KEY_ALIAS repository secret"; exit 1; }
           test -n "$KEY_PASSWORD" || { echo "Missing KEY_PASSWORD repository secret"; exit 1; }
@@ -84,6 +84,8 @@ jobs:
 
       - name: Validate signed release APK
         working-directory: apps/mobile
+        env:
+          EXPO_PUBLIC_WEB_URL: ${{ vars.EXPO_PUBLIC_WEB_URL }}
         run: |
           APK="$(find android/app/build/outputs/apk/release -name '*.apk' -print -quit)"
           test -n "$APK"
@@ -94,7 +96,11 @@ jobs:
           "$APK_SIGNER" verify --verbose --print-certs "$APK"
           BADGING="$("$AAPT" dump badging "$APK")"
           printf '%s\n' "$BADGING" | grep -F "package: name='com.cybersathi.app'"
-          printf '%s\n' "$BADGING" | grep -F "versionCode='2'"
+          printf '%s\n' "$BADGING" | grep -F "versionCode='3'"
+          printf '%s\n' "$BADGING" | grep -q '^application-icon-'
+          WEB_BUNDLE="$(unzip -Z1 "$APK" | grep -E '^assets/index\.android\.bundle$' || true)"
+          test -n "$WEB_BUNDLE"
+          unzip -p "$APK" "$WEB_BUNDLE" | grep -aF "$EXPO_PUBLIC_WEB_URL" >/dev/null
 
       - name: Upload APK artifact
         uses: actions/upload-artifact@v4

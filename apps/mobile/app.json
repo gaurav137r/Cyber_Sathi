@@ -2,11 +2,21 @@
   "expo": {
     "name": "Cyber Sathi",
     "slug": "cyber-sathi",
-    "version": "1.0.0",
+    "version": "1.0.2",
+    "icon": "./assets/icon.png",
+    "splash": {
+      "image": "./assets/splash.png",
+      "resizeMode": "contain",
+      "backgroundColor": "#0B2E2E"
+    },
     "orientation": "portrait",
     "android": {
       "package": "com.cybersathi.app",
-      "versionCode": 2,
+      "versionCode": 3,
+      "adaptiveIcon": {
+        "foregroundImage": "./assets/icon.png",
+        "backgroundColor": "#0B2E2E"
+      },
       "permissions": [
         "android.permission.RECORD_AUDIO",
         "android.permission.MODIFY_AUDIO_SETTINGS"

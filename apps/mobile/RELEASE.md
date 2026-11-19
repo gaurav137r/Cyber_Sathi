@@ -39,8 +39,9 @@ Add these repository Actions secrets in GitHub Settings → Secrets and variable
 | `KEY_PASSWORD` | Password for the signing key |
 
 Add `EXPO_PUBLIC_WEB_URL` as a repository Actions variable. It must be the
-public HTTPS URL hosting the web app; the installed WebView uses it to load
-Cyber Sathi and request microphone access.
+production URL `https://cyber-sathi-frontend.onrender.com`. Release builds
+verify that the bundled WebView points to this frontend rather than an Expo
+development server. In development, the app may use the local Expo host.
 
 Do not put Gemini, Supabase, or keystore credentials in `EXPO_PUBLIC_*` values.
 Those values are embedded in the app bundle. Keep server credentials in the API
@@ -49,7 +50,7 @@ runtime environment.
 ## Build and release
 
 - Run the workflow manually from Actions to build an artifact.
-- Push a version tag such as `v1.0.0` to build the APK and attach it to a GitHub
+- Push a version tag such as `v1.0.2` to build the APK and attach it to a GitHub
   Release.
 - The APK is produced at `apps/mobile/android/app/build/outputs/apk/release/`.
 
