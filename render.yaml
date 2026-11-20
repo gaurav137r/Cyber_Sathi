@@ -1,0 +1,30 @@
+services:
+  - type: web
+    name: cyber-sathi-api-docker
+    runtime: docker
+    branch: main
+    plan: free
+    region: singapore
+    dockerContext: .
+    dockerfilePath: apps/api/Dockerfile
+    healthCheckPath: /health
+    autoDeploy: false
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: PORT
+        value: "3000"
+      - key: IMAGE_PROVIDER
+        value: cloudflare
+      - key: IMAGE_FONT_REGULAR
+        value: /usr/share/fonts/dejavu/DejaVuSans.ttf
+      - key: IMAGE_FONT_BOLD
+        value: /usr/share/fonts/dejavu/DejaVuSans-Bold.ttf
+      - key: IMAGE_FONT_DEVANAGARI
+        value: /usr/share/fonts/noto/NotoSansDevanagari-Regular.ttf
+      - key: IMAGE_FONT_FAMILY
+        value: "DejaVu Sans"
+      - key: IMAGE_FONT_FAMILY_BOLD
+        value: "DejaVu Sans"
+      - key: IMAGE_FONT_FAMILY_DEVANAGARI
+        value: "Noto Sans Devanagari"

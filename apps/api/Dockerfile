@@ -16,15 +16,17 @@ RUN pnpm prisma generate && pnpm build
 
 FROM node:22-alpine3.22 AS runner
 RUN corepack enable && corepack prepare pnpm@10.34.3 --activate
-RUN apk add --no-cache imagemagick libjpeg-turbo libwebp font-dejavu font-noto-devanagari \
+RUN apk add --no-cache imagemagick libjpeg-turbo libwebp font-dejavu font-noto-devanagari libreoffice-writer \
   && magick -version | grep -Eq '^Version: ImageMagick 7' \
-  && magick -list format | grep -Eq '^[[:space:]]*JPEG\\*?[[:space:]].*rw' \
-  && magick -list format | grep -Eq '^[[:space:]]*WEBP\\*?[[:space:]].*rw' \
+  && magick -list format | grep -Eq '^[[:space:]]*JPEG\*?[[:space:]].*rw' \
+  && magick -list format | grep -Eq '^[[:space:]]*WEBP\*?[[:space:]].*rw' \
   && magick -size 2x2 xc:white /tmp/image-codec-check.jpg \
   && magick /tmp/image-codec-check.jpg -format '%wx%h' info: | grep -qx '2x2' \
   && magick -size 2x2 xc:white /tmp/image-codec-check.webp \
   && magick /tmp/image-codec-check.webp -format '%wx%h' info: | grep -qx '2x2' \
   && rm -f /tmp/image-codec-check.jpg /tmp/image-codec-check.webp \
+  && command -v soffice \
+  && soffice --headless --version \
   && test -f /usr/share/fonts/dejavu/DejaVuSans.ttf \
   && test -f /usr/share/fonts/dejavu/DejaVuSans-Bold.ttf \
   && test -f /usr/share/fonts/noto/NotoSansDevanagari-Regular.ttf
