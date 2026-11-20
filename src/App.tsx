@@ -293,12 +293,16 @@ export default function App() {
   const establishedUserIdRef = useRef<string | null>(null)
   // Latest screen, so async auth callbacks can avoid clobbering an active flow.
   const screenRef = useRef<Screen>("loading")
+  const navigationStackRef = useRef<Screen[]>([])
+  const pendingNavigationRef = useRef(false)
 
   // Keep the screen ref truthful and remember the last meaningful screen.
   // Some browser workspaces unload/reload a tab when you switch away; this lets
   // the app resume the review screen instead of dropping back to Home.
   useEffect(() => {
     screenRef.current = screen
+    if (!pendingNavigationRef.current) navigationStackRef.current = []
+    pendingNavigationRef.current = false
     if (screen === "loading" || screen === "auth" || screen === "success")
       return
     try {
@@ -307,6 +311,18 @@ export default function App() {
       // Session storage can be unavailable; navigation still works without it.
     }
   }, [screen])
+
+  useEffect(() => {
+    const handleNativeBack = () => {
+      const previousScreen = navigationStackRef.current.pop()
+      if (!previousScreen) return
+      pendingNavigationRef.current = true
+      setScreen(previousScreen)
+    }
+    window.addEventListener("cyber-sathi-back", handleNativeBack)
+    return () =>
+      window.removeEventListener("cyber-sathi-back", handleNativeBack)
+  }, [])
 
   // 1. Check real Supabase Authentication session on boot
   useEffect(() => {
@@ -520,7 +536,18 @@ export default function App() {
   }
 
   // Navigation helpers
-  const go = (s: Screen) => setScreen(s)
+  const go = (s: Screen) => {
+    if (s === screenRef.current) return
+    if (s === "auth") {
+      navigationStackRef.current = []
+    } else if (navigationStackRef.current.at(-1) === s) {
+      navigationStackRef.current.pop()
+    } else {
+      navigationStackRef.current.push(screenRef.current)
+    }
+    pendingNavigationRef.current = true
+    setScreen(s)
+  }
 
   const switchTab = (tab: Tab) => {
     setActiveTab(tab)

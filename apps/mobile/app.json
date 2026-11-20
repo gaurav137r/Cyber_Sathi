@@ -2,7 +2,7 @@
   "expo": {
     "name": "Cyber Sathi",
     "slug": "cyber-sathi",
-    "version": "1.0.2",
+    "version": "1.0.3",
     "icon": "./assets/icon.png",
     "splash": {
       "image": "./assets/splash.png",
@@ -10,9 +10,17 @@
       "backgroundColor": "#0B2E2E"
     },
     "orientation": "portrait",
+    "scheme": "cybersathi",
+    "userInterfaceStyle": "automatic",
+    "update": {
+      "fallbackToCacheTimeout": 0
+    },
+    "assetBundlePatterns": [
+      "**/*"
+    ],
     "android": {
       "package": "com.cybersathi.app",
-      "versionCode": 3,
+      "versionCode": 4,
       "adaptiveIcon": {
         "foregroundImage": "./assets/icon.png",
         "backgroundColor": "#0B2E2E"
@@ -20,7 +28,34 @@
       "permissions": [
         "android.permission.RECORD_AUDIO",
         "android.permission.MODIFY_AUDIO_SETTINGS"
-      ]
-    }
+      ],
+      "softwareKeyboardLayoutMode": "pan",
+      "statusBar": {
+        "backgroundColor": "#0B2E2E",
+        "hidden": false,
+        "translucent": false,
+        "barStyle": "light-content"
+      },
+      "navigationBar": {
+        "backgroundColor": "#0B2E2E",
+        "hidden": false,
+        "translucent": false
+      }
+    },
+    "ios": {
+      "userInterfaceStyle": "automatic",
+      "infoPlist": {
+        "UIStatusBarStyle": "light-content",
+        "NSLocationWhenInUseUsageDescription": "This app accesses location data to provide location-based features.",
+        "NSPhotoLibraryUsageDescription": "This app accesses your photo library.",
+        "NSMicrophoneUsageDescription": "This app accesses your microphone for audio recording."
+      }
+    },
+    "web": {
+      "favicon": "./assets/favicon.png"
+    },
+    "plugins": [
+      "expo-sharing"
+    ]
   }
 }

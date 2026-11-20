@@ -175,6 +175,9 @@ importers:
       react-native:
         specifier: ^0.88.0
         version: 0.88.0(@babel/core@7.29.7)(@types/react@19.2.14)(react@19.3.0)
+      react-native-safe-area-context:
+        specifier: ^5.11.1
+        version: 5.11.1(react-native@0.88.0(@babel/core@7.29.7)(@types/react@19.2.14)(react@19.3.0))(react@19.3.0)
       react-native-webview:
         specifier: ^14.0.1
         version: 14.0.1(react-native@0.88.0(@babel/core@7.29.7)(@types/react@19.2.14)(react@19.3.0))(react@19.3.0)
@@ -3814,6 +3817,12 @@ packages:
 
   react-is@18.3.1:
     resolution: {integrity: sha512-/LLMVyas0ljjAtoYiPqYiL8VWXzUUdThrmU5+n20DZv+a+ClRoevUzw5JxU+Ieh5/c87ytoTBV9G1FiKfNJdmg==}
+
+  react-native-safe-area-context@5.11.1:
+    resolution: {integrity: sha512-yCltXXwhwp42vMqfhAsH5BWgAysbLNgwfn3PDwNpOn/CgwfM+eMWgScZIbHbMzJYNLi5bKJEOIUEG4RwKNiECA==}
+    peerDependencies:
+      react: '*'
+      react-native: '*'
 
   react-native-webview@14.0.1:
     resolution: {integrity: sha512-lBUuvFk459Mo+5vUNqwzGvn+I8rDJE6zvOulG2hWWudeEOJfWTsQwOfuYnRu+27djUIXrESFfC+EQE3PGu+FWA==}
@@ -8607,6 +8616,11 @@ snapshots:
     optional: true
 
   react-is@18.3.1: {}
+
+  react-native-safe-area-context@5.11.1(react-native@0.88.0(@babel/core@7.29.7)(@types/react@19.2.14)(react@19.3.0))(react@19.3.0):
+    dependencies:
+      react: 19.3.0
+      react-native: 0.88.0(@babel/core@7.29.7)(@types/react@19.2.14)(react@19.3.0)
 
   react-native-webview@14.0.1(react-native@0.88.0(@babel/core@7.29.7)(@types/react@19.2.14)(react@19.3.0))(react@19.3.0):
     dependencies:

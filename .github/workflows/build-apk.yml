@@ -96,7 +96,7 @@ jobs:
           "$APK_SIGNER" verify --verbose --print-certs "$APK"
           BADGING="$("$AAPT" dump badging "$APK")"
           printf '%s\n' "$BADGING" | grep -F "package: name='com.cybersathi.app'"
-          printf '%s\n' "$BADGING" | grep -F "versionCode='3'"
+          printf '%s\n' "$BADGING" | grep -F "versionCode='4'"
           printf '%s\n' "$BADGING" | grep -q '^application-icon-'
           WEB_BUNDLE="$(unzip -Z1 "$APK" | grep -E '^assets/index\.android\.bundle$' || true)"
           test -n "$WEB_BUNDLE"

@@ -15,6 +15,7 @@ import {
   type ReportLanguage,
   type ReportSocialPlatform,
 } from "../lib/report-center"
+import { saveBlobInNativeApp } from "../lib/native-file-save"
 
 const C = {
   teal900: "#0B2E2E",
@@ -331,18 +332,27 @@ export default function ReportSummaryScreen({
         format,
         language,
       )
-      const url = URL.createObjectURL(blob)
-      const anchor = document.createElement("a")
-      anchor.href = url
-      anchor.download = fileName
-      document.body.appendChild(anchor)
-      anchor.click()
-      anchor.remove()
-      window.setTimeout(() => URL.revokeObjectURL(url), 1_500)
+      const savedNatively = await saveBlobInNativeApp(
+        blob,
+        fileName,
+        blob.type || "application/octet-stream",
+      )
+      if (!savedNatively) {
+        const url = URL.createObjectURL(blob)
+        const anchor = document.createElement("a")
+        anchor.href = url
+        anchor.download = fileName
+        document.body.appendChild(anchor)
+        anchor.click()
+        anchor.remove()
+        window.setTimeout(() => URL.revokeObjectURL(url), 1_500)
+      }
       setDownloadNotice(
         language === "hi"
-          ? `${format.toUpperCase()} फ़ाइल डाउनलोड हो रही है।`
-          : `Your ${format.toUpperCase()} report is downloading.`,
+          ? `${format.toUpperCase()} फ़ाइल ${savedNatively ? "शेयर शीट में खुल गई है।" : "डाउनलोड हो रही है।"}`
+          : savedNatively
+            ? `Your ${format.toUpperCase()} report is ready to save or share.`
+            : `Your ${format.toUpperCase()} report is downloading.`,
       )
     } catch (error) {
       setDownloadError(
