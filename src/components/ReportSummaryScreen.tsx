@@ -2,8 +2,8 @@ import { useCallback, useEffect, useRef, useState } from "react"
 import type { CaseRecord } from "../lib/cases"
 import {
   buildAutoPosterInput,
-  downloadGeneratedImage,
   generatePoster,
+  listGeneratedImages,
   loadGeneratedImageBlob,
 } from "../lib/image-studio"
 import {
@@ -160,12 +160,14 @@ export default function ReportSummaryScreen({
   preferredLanguage = "en",
   onViewCase,
   onHome,
+  onBackToConversation,
   onFileCase,
 }: {
   caseRecord: CaseRecord
   preferredLanguage?: "en" | "hi" | "bn"
   onViewCase: () => void
   onHome: () => void
+  onBackToConversation: () => void
   onFileCase?: () => void
 }) {
   const [language, setLanguage] = useState<ReportLanguage>(
@@ -186,6 +188,7 @@ export default function ReportSummaryScreen({
   const [posterReady, setPosterReady] = useState(false)
   const [notice, setNotice] = useState("")
   const [centreLoaded, setCentreLoaded] = useState(false)
+  const [centreError, setCentreError] = useState("")
   const [downloadBusy, setDownloadBusy] = useState<ReportExportFormat | null>(null)
   const [downloadError, setDownloadError] = useState("")
   const [downloadNotice, setDownloadNotice] = useState("")
@@ -201,17 +204,76 @@ export default function ReportSummaryScreen({
           ...(centre.report?.summaryEnglish ? { en: centre.report.summaryEnglish } : {}),
           ...(centre.report?.summaryHindi ? { hi: centre.report.summaryHindi } : {}),
         }))
+        const savedPost = centre.socialPosts.find((post) =>
+          platforms.some((item) => item.id === post.platform),
+        )
+        if (savedPost) {
+          setPlatform(savedPost.platform as ReportSocialPlatform)
+          setDraft({
+            caption: savedPost.caption,
+            hashtags: normaliseTags(savedPost.hashtags),
+          })
+          setNotice("Your previously saved awareness post has been restored.")
+        }
+        const savedPoster = centre.socialPosts.find(
+          (post) => typeof post.imageUrl === "string" && post.imageUrl,
+        )
+        if (savedPoster?.imageUrl) {
+          setPosterImageUrl(savedPoster.imageUrl)
+          setPosterFileName("cyber-sathi-awareness-poster.png")
+          setPosterReady(true)
+        }
       })
-      .catch(() => {
-        // The summary below can still be generated or built on this device.
+      .catch((error) => {
+        if (!live) return
+        setCentreError(
+          error instanceof Error
+            ? error.message
+            : "Could not load the saved report and posts.",
+        )
       })
       .finally(() => {
         if (live) setCentreLoaded(true)
+      })
+
+    void listGeneratedImages(caseRecord.id)
+      .then(async (images) => {
+        const savedImage = images.find(
+          (image) => image.status === "READY" && image.hasFinal,
+        )
+        if (!live || !savedImage) return
+        const blob = await loadGeneratedImageBlob(
+          caseRecord.id,
+          savedImage.id,
+          "final",
+        )
+        if (!live) return
+        setPosterImageUrl(URL.createObjectURL(blob))
+        setPosterFileName(
+          `cyber-sathi-${savedImage.template}-${savedImage.width}x${savedImage.height}.${savedImage.format === "jpeg" ? "jpg" : savedImage.format}`,
+        )
+        setPosterReady(true)
+      })
+      .catch((error) => {
+        if (!live) return
+        setPosterError(
+          error instanceof Error
+            ? `Could not restore the saved poster: ${error.message}`
+            : "Could not restore the saved poster.",
+        )
       })
     return () => {
       live = false
     }
   }, [caseRecord.id])
+
+  useEffect(
+    () => () => {
+      if (posterImageUrl?.startsWith("blob:"))
+        URL.revokeObjectURL(posterImageUrl)
+    },
+    [posterImageUrl],
+  )
 
   const loadSummary = useCallback(
     async (target: ReportLanguage) => {
@@ -222,16 +284,16 @@ export default function ReportSummaryScreen({
       try {
         const generated = await generateReportSummary(caseRecord.id, target)
         setSummaries((previous) => ({ ...previous, [target]: generated.summary }))
-      } catch {
+      } catch (error) {
         setSummaries((previous) => ({
           ...previous,
           [target]: localSummary(caseRecord, target),
         }))
         setLocalLanguages((previous) => ({ ...previous, [target]: true }))
         setSummaryError(
-          target === "hi"
+          `${target === "hi"
             ? "सारांश सेवा उपलब्ध नहीं थी, इसलिए इस डिवाइस पर सुरक्षित सारांश बनाया गया है।"
-            : "The summary service was unavailable, so a safe summary was created on this device.",
+            : "The summary service was unavailable, so a safe summary was created on this device."}${error instanceof Error ? ` ${error.message}` : ""}`,
         )
       } finally {
         setSummaryBusy(false)
@@ -295,6 +357,23 @@ export default function ReportSummaryScreen({
     }
   }
 
+  const downloadSummary = () => {
+    if (!summaryText) return
+    const url = URL.createObjectURL(
+      new Blob([summaryText], { type: "text/plain;charset=utf-8" }),
+    )
+    const anchor = document.createElement("a")
+    anchor.href = url
+    anchor.download = `cyber-sathi-summary-${language}.txt`
+    document.body.appendChild(anchor)
+    anchor.click()
+    anchor.remove()
+    window.setTimeout(() => URL.revokeObjectURL(url), 1_500)
+    setDownloadNotice(
+      language === "hi" ? "सारांश डाउनलोड हो रहा है।" : "Your summary is downloading.",
+    )
+  }
+
   const createPost = async () => {
     setPostBusy(true)
     setPostError("")
@@ -317,12 +396,12 @@ export default function ReportSummaryScreen({
             ? "ड्राफ्ट तैयार है। पोस्टर नहीं बन सका, पर आप कैप्शन साझा कर सकते हैं।"
             : "Draft is ready. The poster could not be generated, but you can still share the caption.",
       )
-    } catch {
+    } catch (error) {
       setDraft(localPost(caseRecord, platform, language))
       setPostError(
-        language === "hi"
+        `${language === "hi"
           ? "पोस्ट सेवा उपलब्ध नहीं थी, इसलिए इस डिवाइस पर सुरक्षित ड्राफ्ट बनाया गया है।"
-          : "The post service was unavailable, so a safe draft was created on this device.",
+          : "The post service was unavailable, so a safe draft was created on this device."}${error instanceof Error ? ` ${error.message}` : ""}`,
       )
     } finally {
       setPostBusy(false)
@@ -365,9 +444,6 @@ export default function ReportSummaryScreen({
   }
 
   const resetPoster = () => {
-    if (posterImageUrl) {
-      URL.revokeObjectURL(posterImageUrl)
-    }
     setPosterImageUrl(null)
     setPosterFileName("")
     setPosterReady(false)
@@ -447,20 +523,48 @@ export default function ReportSummaryScreen({
           borderBottom: `1px solid ${C.divider}`,
         }}
       >
-        <h2
+        <div
           style={{
-            margin: 0,
-            fontSize: 18,
-            fontWeight: 700,
-            color: C.textPrimary,
-            fontFamily: "'Poppins', sans-serif",
+            display: "flex",
+            justifyContent: "space-between",
+            alignItems: "center",
+            gap: 8,
           }}
         >
-          Your report summary
-        </h2>
-        <p style={{ margin: "3px 0 0", fontSize: 11, color: C.textSecondary }}>
-          Saved to your Cyber Sathi account. Choose a language, then share an awareness post.
-        </p>
+          <div>
+            <h2
+              style={{
+                margin: 0,
+                fontSize: 18,
+                fontWeight: 700,
+                color: C.textPrimary,
+                fontFamily: "'Poppins', sans-serif",
+              }}
+            >
+              Your report summary
+            </h2>
+            <p style={{ margin: "3px 0 0", fontSize: 11, color: C.textSecondary }}>
+              Saved to your Cyber Sathi account. Choose a language, then share an awareness post.
+            </p>
+          </div>
+          <button
+            type="button"
+            onClick={onBackToConversation}
+            style={{
+              flexShrink: 0,
+              border: `1px solid ${C.teal600}`,
+              borderRadius: 18,
+              padding: "8px 10px",
+              background: C.white,
+              color: C.teal700,
+              fontSize: 10,
+              fontWeight: 700,
+              cursor: "pointer",
+            }}
+          >
+            Back to chat
+          </button>
+        </div>
       </div>
 
       <div
@@ -524,11 +628,11 @@ export default function ReportSummaryScreen({
                 {caseRecord.status === "FILED" || caseRecord.status === "RESOLVED" || caseRecord.status === "ARCHIVED"
                   ? "Case Closed"
                   : caseRecord.status === "REVIEWED"
-                    ? "Review Completed"
+                    ? "Report Completed"
                     : "In Progress"}
               </p>
               <p style={{ margin: 0, fontSize: 10, color: C.textSecondary }}>
-                Status: <strong>{caseRecord.status}</strong>
+                Status: <strong>{caseRecord.status === "REVIEWED" ? "COMPLETED" : caseRecord.status}</strong>
               </p>
             </div>
           </div>
@@ -551,6 +655,19 @@ export default function ReportSummaryScreen({
             </button>
           )}
         </div>
+        {centreError && (
+          <p
+            role="alert"
+            style={{
+              margin: 0,
+              fontSize: 10,
+              lineHeight: 1.45,
+              color: C.danger,
+            }}
+          >
+            Saved report data could not be loaded: {centreError}
+          </p>
+        )}
 
         <div
           style={{
@@ -653,6 +770,24 @@ export default function ReportSummaryScreen({
                 {summaryError}
               </p>
             )}
+            <button
+              type="button"
+              onClick={downloadSummary}
+              disabled={!summaryText}
+              style={{
+                marginTop: 10,
+                border: `1px solid ${C.teal600}`,
+                borderRadius: 18,
+                padding: "7px 12px",
+                background: summaryText ? C.white : C.bgCanvas,
+                color: summaryText ? C.teal700 : C.textSecondary,
+                fontSize: 11,
+                fontWeight: 700,
+                cursor: summaryText ? "pointer" : "not-allowed",
+              }}
+            >
+              {language === "hi" ? "सारांश डाउनलोड करें" : "Download summary"}
+            </button>
             {summaryBusy && summaryText && (
               <p style={{ margin: "9px 0 0", fontSize: 10, color: C.textSecondary }}>
                 {language === "hi" ? "अद्यतन हो रहा है…" : "Refreshing…"}
@@ -1012,6 +1147,23 @@ export default function ReportSummaryScreen({
         </div>
 
         <div style={{ marginTop: 2 }}>
+          <button
+            type="button"
+            onClick={onBackToConversation}
+            style={{
+              width: "100%",
+              border: `1px solid ${C.teal600}`,
+              background: C.white,
+              color: C.teal700,
+              borderRadius: 24,
+              padding: "12px 14px",
+              fontSize: 13,
+              fontWeight: 700,
+              cursor: "pointer",
+            }}
+          >
+            Return to conversation
+          </button>
           <button
             type="button"
             onClick={onViewCase}

@@ -179,6 +179,7 @@ export class BlandService {
             request_data: {
               case_id: caseId,
               conversation_id: conversation.id,
+              language: lang,
               // Voice is an agent-level setting. Sending a per-session voice
               // override caused the caller to hear different voices between
               // reconnects, so the agent snapshot is the single source of truth.

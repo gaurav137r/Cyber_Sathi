@@ -22,6 +22,7 @@ export interface ReportCenterData {
     platform: string
     caption: string
     hashtags: unknown
+    imageUrl: string | null
     createdAt: string
   }>
 }

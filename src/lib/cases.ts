@@ -26,7 +26,12 @@ export interface CaseRecord {
 
 export function isCaseOpen(record: Pick<CaseRecord, "status">): boolean {
   const s = String(record.status || "").toUpperCase()
-  return !["FILED", "RESOLVED", "ARCHIVED"].includes(s)
+  return !["REVIEWED", "FILED", "RESOLVED", "ARCHIVED"].includes(s)
+}
+
+export function caseStatusLabel(status: string): string {
+  const normalized = String(status || "").toUpperCase()
+  return normalized === "REVIEWED" ? "COMPLETED" : normalized
 }
 
 type ApiCase = {

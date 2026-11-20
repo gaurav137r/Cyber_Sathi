@@ -12,7 +12,7 @@ const apiBaseUrl =
   `${window.location.protocol}//${window.location.hostname}:3000`
 
 export const BLAND_AGENT_ID =
-  import.meta.env.VITE_BLAND_AGENT_ID || "bea03398-7301-48f1-9418-44aeeb7ee633"
+  import.meta.env.VITE_BLAND_AGENT_ID || "209a8a84-d772-401f-9b33-6930cf55c939"
 
 /**
  * The SDK ships with a hard-coded 10s silence watchdog (`wsSettings.timeout`).

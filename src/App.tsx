@@ -1,5 +1,3 @@
-import LoadingScreen from "./LoadingScreen"
-
 // ─── Screen type enum
 type Screen = "loading" | "auth" | "onboard-profile" | "home" | "agent-chat" | "review-report" | "report-summary" | "success" | "my-cases" | "case-status" | "defend" | "profile" | "filing-preview"
 
@@ -22,6 +20,7 @@ import {
 import {
   fetchUserCases,
   isCaseOpen,
+  caseStatusLabel,
   saveReviewedCase,
   confirmAndCompileCase,
   type CaseRecord,
@@ -483,7 +482,11 @@ export default function App() {
     try {
       const records = await fetchUserCases()
       const savedCase = records.find((record) => record.id === caseId)
-      if (savedCase && isCaseOpen(savedCase)) {
+      if (
+        savedCase &&
+        (isCaseOpen(savedCase) ||
+          (savedCase.reviewed && resumeScreen === "agent-chat"))
+      ) {
         await continueReport(savedCase, lang)
         if (resumeScreen === "review-report") go("review-report")
         else if (resumeScreen === "case-status") go("case-status")
@@ -606,16 +609,6 @@ export default function App() {
     resumeLanguage: "en" | "hi" | "bn" = language,
   ) => {
     setActiveCase(caseRecord)
-    // A report that the user already reviewed and saved is a finished
-    // document. Reopen its summary/download page instead of a blank chat.
-    if (caseRecord.reviewed) {
-      setSubmittedCase(caseRecord)
-      setSathiCaseId(caseRecord.id)
-      setSathiFacts(null)
-      setExtractedData(caseRecordToReport(caseRecord))
-      go("report-summary")
-      return
-    }
     setAutoStartMic(false)
     setSathiCaseId(caseRecord.id)
     if (sessionUser?.id)
@@ -691,7 +684,11 @@ export default function App() {
 
   const handleCaseSubmitted = async (caseRec: CaseRecord) => {
     setSubmittedCase(caseRec)
-    setUserCases((prev) => [caseRec, ...prev])
+    setActiveCase(caseRec)
+    setUserCases((prev) => [
+      caseRec,
+      ...prev.filter((record) => record.id !== caseRec.id),
+    ])
     if (sessionUser?.id) {
       window.localStorage.removeItem(activeCaseStorageKey(sessionUser.id))
       window.localStorage.setItem(
@@ -709,6 +706,7 @@ export default function App() {
     go("report-summary")
   }
 
+  const summaryCase = submittedCase ?? activeCase
   const showTabBar = ["home", "my-cases", "defend", "profile"].includes(screen)
 
   return (
@@ -755,8 +753,6 @@ export default function App() {
             flexDirection: "column",
           }}
         >
-          {screen === "loading" && <LoadingScreen onStart={() => {}} />}
-
           {screen === "auth" && (
             <RealAuthScreen
               onAuthenticated={(user) => handleSessionEstablished(user)}
@@ -791,6 +787,16 @@ export default function App() {
               setPreviousFacts={setSathiFacts}
               language={language}
               autoStartMic={autoStartMic}
+              reportFinalized={Boolean(
+                activeCase?.id === sathiCaseId && activeCase.reviewed,
+              )}
+              onOpenFinalReport={() => {
+                const report =
+                  activeCase?.id === sathiCaseId ? activeCase : submittedCase
+                if (!report) return
+                setSubmittedCase(report)
+                go("report-summary")
+              }}
               onProceedToReview={() => go("review-report")}
               onBack={() => go("home")}
             />
@@ -817,35 +823,36 @@ export default function App() {
                   extractedData,
                   userProfile,
                 )
-                try {
-                  await confirmAndCompileCase(sathiCaseId)
-                } catch (error) {
-                  console.warn(
-                    "Could not confirm or compile the case report; the saved draft is still available:",
-                    error,
-                  )
-                }
-                await handleCaseSubmitted(caseRecord)
+                await confirmAndCompileCase(sathiCaseId)
+                await handleCaseSubmitted({
+                  ...caseRecord,
+                  status: "REVIEWED",
+                  reviewed: true,
+                })
               }}
               onBack={() => go("agent-chat")}
             />
           )}
 
           {screen === "report-summary" &&
-            (submittedCase ? (
+            (summaryCase ? (
               <ReportSummaryScreen
-                caseRecord={submittedCase}
+                key={summaryCase.id}
+                caseRecord={summaryCase}
                 preferredLanguage={language}
                 onViewCase={() => {
-                  setActiveCase(submittedCase)
+                  setActiveCase(summaryCase)
                   go("case-status")
                 }}
                 onHome={() => {
                   setActiveTab("home")
                   go("home")
                 }}
+                onBackToConversation={() => {
+                  void continueReport(summaryCase)
+                }}
                 onFileCase={() => {
-                  setActiveCase(submittedCase)
+                  setActiveCase(summaryCase)
                   go("filing-preview")
                 }}
               />
@@ -1700,7 +1707,7 @@ function HomeScreen({
                   borderRadius: 8,
                 }}
               >
-                {c.status}
+                {caseStatusLabel(c.status)}
               </span>
             </div>
           ))}
@@ -1753,6 +1760,8 @@ function AgentChatScreen({
   setPreviousFacts,
   language,
   autoStartMic = false,
+  reportFinalized = false,
+  onOpenFinalReport,
   onProceedToReview,
   onBack,
 }: {
@@ -1765,6 +1774,8 @@ function AgentChatScreen({
   setPreviousFacts: React.Dispatch<React.SetStateAction<SathiFacts | null>>
   language: "en" | "hi" | "bn"
   autoStartMic?: boolean
+  reportFinalized?: boolean
+  onOpenFinalReport: () => void
   onProceedToReview: () => void
   onBack: () => void
 }) {
@@ -1893,7 +1904,7 @@ function AgentChatScreen({
   }, [messages, caseId, language])
 
   const submitTurn = async (input: { text?: string; audio?: Blob }) => {
-    if (!caseId || loadingReply) return
+    if (!caseId || loadingReply || reportFinalized) return
     const text = input.text?.trim()
     const userMsg: ChatMessage = {
       id: `msg-${Date.now()}`,
@@ -1952,6 +1963,7 @@ function AgentChatScreen({
   }
 
   const toggleMic = async () => {
+    if (reportFinalized) return
     if (isListening && recorderRef.current) {
       recorderRef.current.stop()
       setIsListening(false)
@@ -2210,6 +2222,7 @@ function AgentChatScreen({
     extractedData.isComplete || previousFacts?.intakeComplete,
   )
   const canReview =
+    !reportFinalized &&
     hasAnyData &&
     !evidenceBusy &&
     !loadingReply &&
@@ -2319,17 +2332,28 @@ function AgentChatScreen({
           <button
             type="button"
             onClick={() => setShowLiveVoice(true)}
+            disabled={reportFinalized}
             style={{
-              background: voiceLive
-                ? "rgba(34,197,94,.22)"
-                : "rgba(255,255,255,0.15)",
-              border: voiceLive ? "1px solid rgba(34,197,94,.5)" : "none",
+              background: reportFinalized
+                ? "rgba(255,255,255,.1)"
+                : voiceLive
+                  ? "rgba(34,197,94,.22)"
+                  : "rgba(255,255,255,0.15)",
+              border: reportFinalized
+                ? "1px solid rgba(255,255,255,.2)"
+                : voiceLive
+                  ? "1px solid rgba(34,197,94,.5)"
+                  : "none",
               borderRadius: 8,
               padding: "6px 10px",
-              color: voiceLive ? "#bbf7d0" : C.mint300,
+              color: reportFinalized
+                ? "rgba(255,255,255,.45)"
+                : voiceLive
+                  ? "#bbf7d0"
+                  : C.mint300,
               fontSize: 11,
               fontWeight: 700,
-              cursor: "pointer",
+              cursor: reportFinalized ? "not-allowed" : "pointer",
             }}
           >
             {voiceLive ? "● Live" : voiceConnecting ? "… Voice" : "🎙 Voice"}
@@ -2513,7 +2537,45 @@ function AgentChatScreen({
 
       </div>
 
-      {hasAnyData && !canReview && (
+      {reportFinalized && (
+        <div
+          style={{
+            flexShrink: 0,
+            padding: "10px 16px",
+            background: C.white,
+            borderTop: `1px solid ${C.divider}`,
+          }}
+        >
+          <p
+            style={{
+              margin: "0 0 8px",
+              textAlign: "center",
+              fontSize: 11,
+              color: C.textSecondary,
+            }}
+          >
+            This report is finalized. Your saved conversation is available to review.
+          </p>
+          <button
+            type="button"
+            onClick={onOpenFinalReport}
+            style={{
+              width: "100%",
+              padding: "12px",
+              borderRadius: 24,
+              border: 0,
+              background: `linear-gradient(135deg, ${C.teal700}, ${C.teal600})`,
+              color: C.white,
+              fontWeight: 700,
+              fontSize: 14,
+              cursor: "pointer",
+            }}
+          >
+            Open finalized report
+          </button>
+        </div>
+      )}
+      {!reportFinalized && hasAnyData && !canReview && (
         <div
           style={{
             flexShrink: 0,
@@ -2624,7 +2686,7 @@ function AgentChatScreen({
         <button
           type="button"
           onClick={() => evidenceInputRef.current?.click()}
-          disabled={!caseId || loadingReply || evidenceBusy}
+          disabled={!caseId || loadingReply || evidenceBusy || reportFinalized}
           aria-label="Upload evidence"
           title="Upload evidence (screenshot/document)"
           style={{
@@ -2634,12 +2696,12 @@ function AgentChatScreen({
             border: `1px solid ${C.divider}`,
             background: C.white,
             color:
-              !caseId || loadingReply || evidenceBusy
+              !caseId || loadingReply || evidenceBusy || reportFinalized
                 ? C.textSecondary
                 : C.teal700,
             fontSize: 16,
             cursor:
-              !caseId || loadingReply || evidenceBusy
+              !caseId || loadingReply || evidenceBusy || reportFinalized
                 ? "not-allowed"
                 : "pointer",
             flexShrink: 0,
@@ -2650,7 +2712,7 @@ function AgentChatScreen({
         <button
           type="button"
           onClick={toggleMic}
-          disabled={loadingReply || evidenceBusy}
+          disabled={loadingReply || evidenceBusy || reportFinalized}
           aria-label={isListening ? "Stop recording" : "Record voice message"}
           style={{
             width: 44,
@@ -2676,7 +2738,7 @@ function AgentChatScreen({
           type="text"
           aria-label="Type or dictate incident details"
           value={inputText}
-          disabled={loadingReply}
+          disabled={loadingReply || reportFinalized}
           onChange={(e) => setInputText(e.target.value)}
           onKeyDown={(e) => {
             if (e.key === "Enter") {
@@ -2705,7 +2767,7 @@ function AgentChatScreen({
         <button
           type="button"
           onClick={() => void handleSend()}
-          disabled={!caseId || !inputText.trim() || loadingReply}
+          disabled={!caseId || !inputText.trim() || loadingReply || reportFinalized}
           aria-label="Send message"
           style={{
             width: 44,
@@ -2713,11 +2775,11 @@ function AgentChatScreen({
             borderRadius: "50%",
             border: "none",
             background:
-              !caseId || !inputText.trim() || loadingReply
+              !caseId || !inputText.trim() || loadingReply || reportFinalized
                 ? C.divider
                 : C.teal600,
             color:
-              !caseId || !inputText.trim() || loadingReply
+              !caseId || !inputText.trim() || loadingReply || reportFinalized
                 ? C.textSecondary
                 : C.white,
             fontSize: 18,
@@ -3066,8 +3128,8 @@ function LiveVoiceScreen({
         .voice-orb.live .voice-orb-core{animation:core-breathe 2.4s ease-in-out infinite}
         .voice-orb.live i{animation:voice-breathe 2.4s ease-out infinite}
         .voice-orb.live i:nth-of-type(2){animation-delay:.6s}.voice-orb.live i:nth-of-type(3){animation-delay:1.2s}
-        .voice-wave{display:flex;flex-direction:column;alignItems:center;justifyContent:center;min-height:44px}
-        .voice-wave-bars{display:flex;alignItems:center;justifyContent:center;gap:5px;height:36px}
+        .voice-wave{display:flex;flex-direction:column;align-items:center;justify-content:center;min-height:44px}
+        .voice-wave-bars{display:flex;align-items:center;justify-content:center;gap:5px;height:36px}
         .voice-wave-bars span{width:4px;height:22px;border-radius:999px;background:rgba(127,209,192,.45);transform-origin:center;animation:wave-breathe 2.4s ease-in-out infinite;opacity:.55}
         .voice-wave.active .voice-wave-bars span{background:${C.mint300};animation-duration:1.4s;opacity:.9}
         .voice-wave-bars span:nth-child(1){animation-delay:0s;height:12px}
@@ -4251,7 +4313,7 @@ function MyCasesScreen({
                       borderRadius: 8,
                     }}
                   >
-                    {open ? "OPEN" : c.status}
+                    {open ? "OPEN" : caseStatusLabel(c.status)}
                   </span>
                 </div>
 
@@ -4506,7 +4568,7 @@ function CaseStatusScreen({
                 borderRadius: 8,
               }}
             >
-              {isCaseOpen(caseRecord) ? "OPEN" : caseRecord.status}
+              {isCaseOpen(caseRecord) ? "OPEN" : caseStatusLabel(caseRecord.status)}
             </span>
           </div>
           <h3
