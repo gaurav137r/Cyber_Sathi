@@ -988,10 +988,15 @@ function RealAuthScreen({
   language: string
 }) {
   const [mode, setMode] = useState<"signin" | "signup">("signin")
+  const [authMethod, setAuthMethod] = useState<
+    "password" | "emailOtp" | "phoneOtp"
+  >("emailOtp")
   const [email, setEmail] = useState("")
   const [password, setPassword] = useState("")
   const [name, setName] = useState("")
   const [phone, setPhone] = useState("")
+  const [otp, setOtp] = useState("")
+  const [otpSent, setOtpSent] = useState(false)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState("")
   const [notice, setNotice] = useState("")
@@ -1003,6 +1008,87 @@ function RealAuthScreen({
     setBusy(true)
 
     try {
+      if (authMethod === "emailOtp") {
+        const trimmedEmail = email.trim()
+        if (!trimmedEmail || !trimmedEmail.includes("@")) {
+          throw new Error("Please enter a valid email address.")
+        }
+
+        if (!otpSent) {
+          const { error: otpError } = await supabase.auth.signInWithOtp({
+            email: trimmedEmail,
+            options: {
+              shouldCreateUser: true,
+              data: {
+                full_name: name.trim() || undefined,
+                preferred_language: language,
+              },
+            },
+          })
+          if (otpError) throw otpError
+          setOtpSent(true)
+          setNotice(
+            "OTP requested. Check your inbox and spam folder. If it does not arrive, wait 60 seconds before requesting another.",
+          )
+          return
+        }
+
+        if (!/^\d{6}$/.test(otp)) {
+          throw new Error("Please enter the 6-digit OTP.")
+        }
+        const { data, error: verifyError } = await supabase.auth.verifyOtp({
+          email: trimmedEmail,
+          token: otp,
+          type: "email",
+        })
+        if (verifyError) throw verifyError
+        if (!data.session?.user) {
+          throw new Error("Could not create a session. Please try again.")
+        }
+        onAuthenticated(data.session.user)
+        return
+      }
+
+      if (authMethod === "phoneOtp") {
+        const digits = phone.trim().replace(/\D/g, "")
+        if (digits.length !== 10) {
+          throw new Error("Please enter a valid 10-digit mobile number.")
+        }
+        const phoneE164 = `+91${digits}`
+
+        if (!otpSent) {
+          const { error: otpError } = await supabase.auth.signInWithOtp({
+            phone: phoneE164,
+            options: {
+              data: {
+                full_name: name.trim() || undefined,
+                phone_e164: phoneE164,
+                preferred_language: language,
+              },
+            },
+          })
+          if (otpError) throw otpError
+          setOtpSent(true)
+          setNotice("OTP sent to your mobile number.")
+          return
+        }
+
+        if (!/^\d{6}$/.test(otp)) {
+          throw new Error("Please enter the 6-digit OTP.")
+        }
+        const { data, error: verifyError } = await supabase.auth.verifyOtp({
+          phone: phoneE164,
+          token: otp,
+          type: "sms",
+        })
+        if (verifyError) throw verifyError
+        if (!data.session?.user) {
+          throw new Error("Could not create a session. Please try again.")
+        }
+        onAuthenticated(data.session.user)
+        return
+      }
+
       const trimmedEmail = email.trim()
       if (!trimmedEmail || !trimmedEmail.includes("@")) {
         throw new Error("Please enter a valid email address.")
@@ -1132,7 +1218,10 @@ function RealAuthScreen({
             type="button"
             onClick={() => {
               setMode("signin")
+              setOtpSent(false)
+              setOtp("")
               setError("")
+              setNotice("")
             }}
             style={{
               flex: 1,
@@ -1154,7 +1243,10 @@ function RealAuthScreen({
             type="button"
             onClick={() => {
               setMode("signup")
+              setOtpSent(false)
+              setOtp("")
               setError("")
+              setNotice("")
             }}
             style={{
               flex: 1,
@@ -1174,11 +1266,175 @@ function RealAuthScreen({
           </button>
         </div>
 
+        <div
+          style={{
+            display: "flex",
+            gap: 8,
+            marginBottom: 16,
+          }}
+        >
+          {(["password", "emailOtp", "phoneOtp"] as const).map((method) => (
+            <button
+              key={method}
+              type="button"
+              onClick={() => {
+                setAuthMethod(method)
+                setOtpSent(false)
+                setOtp("")
+                setError("")
+                setNotice("")
+              }}
+              style={{
+                flex: 1,
+                padding: "9px 8px",
+                border: `1px solid ${
+                  authMethod === method ? C.teal600 : C.divider
+                }`,
+                borderRadius: 10,
+                background:
+                  authMethod === method ? C.mint100 : C.white,
+                color: authMethod === method ? C.teal900 : C.textSecondary,
+                fontWeight: 700,
+                fontSize: 12,
+                cursor: "pointer",
+              }}
+            >
+              {method === "password"
+                ? "Email + Password"
+                : method === "emailOtp"
+                  ? "Email OTP"
+                  : "Phone OTP"}
+            </button>
+          ))}
+        </div>
+
         <form
           onSubmit={handleAuth}
           style={{ display: "flex", flexDirection: "column", gap: 14 }}
         >
-          {mode === "signup" && (
+          {authMethod === "emailOtp" && (
+            <>
+              {mode === "signup" && (
+                <div>
+                  <label className="cy-label" style={labelStyle} htmlFor="auth-name">
+                    Full Name (Legal Name)
+                  </label>
+                  <input
+                    id="auth-name"
+                    type="text"
+                    required
+                    autoComplete="name"
+                    value={name}
+                    onChange={(e) => setName(e.target.value)}
+                    placeholder="e.g. Ramesh Sharma"
+                    className="cy-input"
+                    style={inputStyle}
+                  />
+                </div>
+              )}
+              <div>
+                <label className="cy-label" style={labelStyle} htmlFor="auth-email-otp">
+                  Email Address
+                </label>
+                <input
+                  id="auth-email-otp"
+                  type="email"
+                  required
+                  autoComplete="email"
+                  value={email}
+                  disabled={otpSent || busy}
+                  onChange={(e) => setEmail(e.target.value)}
+                  placeholder="e.g. citizen@example.com"
+                  className="cy-input"
+                  style={inputStyle}
+                />
+              </div>
+              {otpSent && (
+                <div>
+                  <label className="cy-label" style={labelStyle} htmlFor="auth-email-otp-code">
+                    6-digit OTP
+                  </label>
+                  <input
+                    id="auth-email-otp-code"
+                    type="text"
+                    inputMode="numeric"
+                    autoComplete="one-time-code"
+                    value={otp}
+                    onChange={(e) =>
+                      setOtp(e.target.value.replace(/\D/g, "").slice(0, 6))
+                    }
+                    placeholder="Enter OTP"
+                    className="cy-input"
+                    style={{ ...inputStyle, letterSpacing: 8, textAlign: "center" }}
+                  />
+                </div>
+              )}
+            </>
+          )}
+
+          {authMethod === "phoneOtp" && (
+            <>
+              <div>
+                <label className="cy-label" style={labelStyle} htmlFor="auth-phone">
+                  Mobile Number
+                </label>
+                <div
+                  style={{
+                    display: "flex",
+                    alignItems: "center",
+                    gap: 8,
+                    ...inputStyle,
+                  }}
+                >
+                  <span style={{ color: C.textSecondary, fontWeight: 600 }}>
+                    +91
+                  </span>
+                  <input
+                    id="auth-phone"
+                    type="tel"
+                    inputMode="numeric"
+                    autoComplete="tel-national"
+                    value={phone}
+                    disabled={otpSent || busy}
+                    onChange={(e) =>
+                      setPhone(e.target.value.replace(/\D/g, "").slice(0, 10))
+                    }
+                    placeholder="10-digit mobile number"
+                    style={{
+                      border: 0,
+                      outline: "none",
+                      width: "100%",
+                      background: "transparent",
+                      font: "inherit",
+                      color: C.textPrimary,
+                    }}
+                  />
+                </div>
+              </div>
+              {otpSent && (
+                <div>
+                  <label className="cy-label" style={labelStyle} htmlFor="auth-otp">
+                    6-digit OTP
+                  </label>
+                  <input
+                    id="auth-otp"
+                    type="text"
+                    inputMode="numeric"
+                    autoComplete="one-time-code"
+                    value={otp}
+                    onChange={(e) =>
+                      setOtp(e.target.value.replace(/\D/g, "").slice(0, 6))
+                    }
+                    placeholder="Enter OTP"
+                    className="cy-input"
+                    style={{ ...inputStyle, letterSpacing: 8, textAlign: "center" }}
+                  />
+                </div>
+              )}
+            </>
+          )}
+
+          {mode === "signup" && authMethod === "password" && (
             <>
               <div>
                 <label className="cy-label" style={labelStyle} htmlFor="auth-name">
@@ -1235,39 +1491,43 @@ function RealAuthScreen({
             </>
           )}
 
-          <div>
-            <label className="cy-label" style={labelStyle} htmlFor="auth-email">
-              Official Email Address
-            </label>
-            <input
-              id="auth-email"
-              type="email"
-              required
-              autoComplete="email"
-              value={email}
-              onChange={(e) => setEmail(e.target.value)}
-              placeholder="e.g. citizen@example.com"
-              className="cy-input" style={inputStyle}
-            />
-          </div>
+          {authMethod === "password" && (
+            <>
+              <div>
+                <label className="cy-label" style={labelStyle} htmlFor="auth-email">
+                  Official Email Address
+                </label>
+                <input
+                  id="auth-email"
+                  type="email"
+                  required
+                  autoComplete="email"
+                  value={email}
+                  onChange={(e) => setEmail(e.target.value)}
+                  placeholder="e.g. citizen@example.com"
+                  className="cy-input" style={inputStyle}
+                />
+              </div>
 
-          <div>
-            <label className="cy-label" style={labelStyle} htmlFor="auth-password">
-              Password
-            </label>
-            <input
-              id="auth-password"
-              type="password"
-              required
-              autoComplete={
-                mode === "signup" ? "new-password" : "current-password"
-              }
-              value={password}
-              onChange={(e) => setPassword(e.target.value)}
-              placeholder="Minimum 6 characters"
-              className="cy-input" style={inputStyle}
-            />
-          </div>
+              <div>
+                <label className="cy-label" style={labelStyle} htmlFor="auth-password">
+                  Password
+                </label>
+                <input
+                  id="auth-password"
+                  type="password"
+                  required
+                  autoComplete={
+                    mode === "signup" ? "new-password" : "current-password"
+                  }
+                  value={password}
+                  onChange={(e) => setPassword(e.target.value)}
+                  placeholder="Minimum 6 characters"
+                  className="cy-input" style={inputStyle}
+                />
+              </div>
+            </>
+          )}
 
           {error && (
             <div
@@ -1344,9 +1604,13 @@ function RealAuthScreen({
               label={
                 busy
                   ? "Processing..."
-                  : mode === "signin"
-                    ? "Sign In to Cyber Sathi"
-                    : "Register Official Account"
+                  : authMethod === "emailOtp" || authMethod === "phoneOtp"
+                    ? otpSent
+                      ? "Verify OTP"
+                      : "Send OTP"
+                    : mode === "signin"
+                      ? "Sign In to Cyber Sathi"
+                      : "Register Official Account"
               }
               disabled={busy}
               onClick={() => {}}
