@@ -739,7 +739,6 @@ export default function App() {
           flexDirection: "column",
         }}
       >
-
         {/* Screen Routing */}
         <div
           className="app-screen-host"
@@ -988,9 +987,8 @@ function RealAuthScreen({
   language: string
 }) {
   const [mode, setMode] = useState<"signin" | "signup">("signin")
-  const [authMethod, setAuthMethod] = useState<
-    "password" | "emailOtp" | "phoneOtp"
-  >("emailOtp")
+  const [authMethod, setAuthMethod] =
+    useState<"password" | "emailOtp" | "phoneOtp">("emailOtp")
   const [email, setEmail] = useState("")
   const [password, setPassword] = useState("")
   const [name, setName] = useState("")
@@ -1089,11 +1087,28 @@ function RealAuthScreen({
         return
       }
 
+      if (mode === "signup" && otpSent) {
+        if (!/^\d{6}$/.test(otp)) {
+          throw new Error("Please enter the 6-digit OTP.")
+        }
+        const { data, error: verifyError } = await supabase.auth.verifyOtp({
+          email: email.trim(),
+          token: otp,
+          type: "signup",
+        })
+        if (verifyError) throw verifyError
+        if (!data.session?.user) {
+          throw new Error("Could not verify your email. Please try again.")
+        }
+        onAuthenticated(data.session.user)
+        return
+      }
+
       const trimmedEmail = email.trim()
       if (!trimmedEmail || !trimmedEmail.includes("@")) {
         throw new Error("Please enter a valid email address.")
       }
-      if (password.length < 6) {
+      if (!otpSent && password.length < 6) {
         throw new Error("Password must be at least 6 characters.")
       }
 
@@ -1122,10 +1137,10 @@ function RealAuthScreen({
         if (data.session?.user) {
           onAuthenticated(data.session.user)
         } else if (data.user) {
+          setOtpSent(true)
           setNotice(
-            "Account created. Check your inbox and confirm your email before signing in.",
+            "A 6-digit email verification code was requested. Enter it below to finish creating your account.",
           )
-          setMode("signin")
         }
       } else {
         // Sign In
@@ -1291,8 +1306,7 @@ function RealAuthScreen({
                   authMethod === method ? C.teal600 : C.divider
                 }`,
                 borderRadius: 10,
-                background:
-                  authMethod === method ? C.mint100 : C.white,
+                background: authMethod === method ? C.mint100 : C.white,
                 color: authMethod === method ? C.teal900 : C.textSecondary,
                 fontWeight: 700,
                 fontSize: 12,
@@ -1307,6 +1321,19 @@ function RealAuthScreen({
             </button>
           ))}
         </div>
+        {authMethod === "emailOtp" && !otpSent && (
+          <p
+            style={{
+              margin: "-8px 0 16px",
+              color: C.textSecondary,
+              fontSize: 12,
+              lineHeight: 1.4,
+            }}
+          >
+            Choose Email OTP, then Send OTP. The code entry field appears after
+            the request is accepted.
+          </p>
+        )}
 
         <form
           onSubmit={handleAuth}
@@ -1314,9 +1341,13 @@ function RealAuthScreen({
         >
           {authMethod === "emailOtp" && (
             <>
-              {mode === "signup" && (
+              {mode === "signup" && !otpSent && (
                 <div>
-                  <label className="cy-label" style={labelStyle} htmlFor="auth-name">
+                  <label
+                    className="cy-label"
+                    style={labelStyle}
+                    htmlFor="auth-name"
+                  >
                     Full Name (Legal Name)
                   </label>
                   <input
@@ -1333,7 +1364,11 @@ function RealAuthScreen({
                 </div>
               )}
               <div>
-                <label className="cy-label" style={labelStyle} htmlFor="auth-email-otp">
+                <label
+                  className="cy-label"
+                  style={labelStyle}
+                  htmlFor="auth-email-otp"
+                >
                   Email Address
                 </label>
                 <input
@@ -1351,7 +1386,11 @@ function RealAuthScreen({
               </div>
               {otpSent && (
                 <div>
-                  <label className="cy-label" style={labelStyle} htmlFor="auth-email-otp-code">
+                  <label
+                    className="cy-label"
+                    style={labelStyle}
+                    htmlFor="auth-email-otp-code"
+                  >
                     6-digit OTP
                   </label>
                   <input
@@ -1365,7 +1404,11 @@ function RealAuthScreen({
                     }
                     placeholder="Enter OTP"
                     className="cy-input"
-                    style={{ ...inputStyle, letterSpacing: 8, textAlign: "center" }}
+                    style={{
+                      ...inputStyle,
+                      letterSpacing: 8,
+                      textAlign: "center",
+                    }}
                   />
                 </div>
               )}
@@ -1375,7 +1418,11 @@ function RealAuthScreen({
           {authMethod === "phoneOtp" && (
             <>
               <div>
-                <label className="cy-label" style={labelStyle} htmlFor="auth-phone">
+                <label
+                  className="cy-label"
+                  style={labelStyle}
+                  htmlFor="auth-phone"
+                >
                   Mobile Number
                 </label>
                 <div
@@ -1413,7 +1460,11 @@ function RealAuthScreen({
               </div>
               {otpSent && (
                 <div>
-                  <label className="cy-label" style={labelStyle} htmlFor="auth-otp">
+                  <label
+                    className="cy-label"
+                    style={labelStyle}
+                    htmlFor="auth-otp"
+                  >
                     6-digit OTP
                   </label>
                   <input
@@ -1427,17 +1478,25 @@ function RealAuthScreen({
                     }
                     placeholder="Enter OTP"
                     className="cy-input"
-                    style={{ ...inputStyle, letterSpacing: 8, textAlign: "center" }}
+                    style={{
+                      ...inputStyle,
+                      letterSpacing: 8,
+                      textAlign: "center",
+                    }}
                   />
                 </div>
               )}
             </>
           )}
 
-          {mode === "signup" && authMethod === "password" && (
+          {mode === "signup" && authMethod === "password" && !otpSent && (
             <>
               <div>
-                <label className="cy-label" style={labelStyle} htmlFor="auth-name">
+                <label
+                  className="cy-label"
+                  style={labelStyle}
+                  htmlFor="auth-name"
+                >
                   Full Name (Legal Name)
                 </label>
                 <input
@@ -1448,12 +1507,17 @@ function RealAuthScreen({
                   value={name}
                   onChange={(e) => setName(e.target.value)}
                   placeholder="e.g. Ramesh Sharma"
-                  className="cy-input" style={inputStyle}
+                  className="cy-input"
+                  style={inputStyle}
                 />
               </div>
 
               <div>
-                <label className="cy-label" style={labelStyle} htmlFor="auth-phone">
+                <label
+                  className="cy-label"
+                  style={labelStyle}
+                  htmlFor="auth-phone"
+                >
                   Mobile Number
                 </label>
                 <div
@@ -1494,7 +1558,11 @@ function RealAuthScreen({
           {authMethod === "password" && (
             <>
               <div>
-                <label className="cy-label" style={labelStyle} htmlFor="auth-email">
+                <label
+                  className="cy-label"
+                  style={labelStyle}
+                  htmlFor="auth-email"
+                >
                   Official Email Address
                 </label>
                 <input
@@ -1503,30 +1571,64 @@ function RealAuthScreen({
                   required
                   autoComplete="email"
                   value={email}
+                  disabled={otpSent || busy}
                   onChange={(e) => setEmail(e.target.value)}
                   placeholder="e.g. citizen@example.com"
-                  className="cy-input" style={inputStyle}
+                  className="cy-input"
+                  style={inputStyle}
                 />
               </div>
 
-              <div>
-                <label className="cy-label" style={labelStyle} htmlFor="auth-password">
-                  Password
-                </label>
-                <input
-                  id="auth-password"
-                  type="password"
-                  required
-                  autoComplete={
-                    mode === "signup" ? "new-password" : "current-password"
-                  }
-                  value={password}
-                  onChange={(e) => setPassword(e.target.value)}
-                  placeholder="Minimum 6 characters"
-                  className="cy-input" style={inputStyle}
-                />
-              </div>
+              {!(mode === "signup" && otpSent) && (
+                <div>
+                  <label
+                    className="cy-label"
+                    style={labelStyle}
+                    htmlFor="auth-password"
+                  >
+                    Password
+                  </label>
+                  <input
+                    id="auth-password"
+                    type="password"
+                    required
+                    autoComplete={
+                      mode === "signup" ? "new-password" : "current-password"
+                    }
+                    value={password}
+                    onChange={(e) => setPassword(e.target.value)}
+                    placeholder="Minimum 6 characters"
+                    className="cy-input"
+                    style={inputStyle}
+                  />
+                </div>
+              )}
             </>
+          )}
+
+          {authMethod === "password" && mode === "signup" && otpSent && (
+            <div>
+              <label
+                className="cy-label"
+                style={labelStyle}
+                htmlFor="auth-signup-otp"
+              >
+                6-digit email verification code
+              </label>
+              <input
+                id="auth-signup-otp"
+                type="text"
+                inputMode="numeric"
+                autoComplete="one-time-code"
+                value={otp}
+                onChange={(e) =>
+                  setOtp(e.target.value.replace(/\D/g, "").slice(0, 6))
+                }
+                placeholder="Enter OTP"
+                className="cy-input"
+                style={{ ...inputStyle, letterSpacing: 8, textAlign: "center" }}
+              />
+            </div>
           )}
 
           {error && (
@@ -1560,23 +1662,70 @@ function RealAuthScreen({
               ✉️ {notice}
               <button
                 type="button"
-                disabled={busy || !email.trim()}
+                disabled={
+                  busy ||
+                  (authMethod === "phoneOtp" ? !phone.trim() : !email.trim())
+                }
                 onClick={async () => {
                   setBusy(true)
                   setError("")
                   try {
-                    const { error: resendErr } = await supabase.auth.resend({
-                      type: "signup",
-                      email: email.trim(),
-                      options: { emailRedirectTo: window.location.origin },
-                    })
-                    if (resendErr) throw resendErr
-                    setNotice(
-                      "Confirmation email sent again. Check your inbox and spam folder.",
-                    )
+                    if (authMethod === "emailOtp") {
+                      const { error: resendErr } =
+                        await supabase.auth.signInWithOtp({
+                          email: email.trim(),
+                          options: {
+                            shouldCreateUser: true,
+                            data: {
+                              full_name: name.trim() || undefined,
+                              preferred_language: language,
+                            },
+                          },
+                        })
+                      if (resendErr) throw resendErr
+                      setNotice(
+                        "A new OTP was requested. Check your inbox and spam folder.",
+                      )
+                    } else if (authMethod === "phoneOtp") {
+                      const digits = phone.trim().replace(/\D/g, "")
+                      if (digits.length !== 10) {
+                        throw new Error(
+                          "Please enter a valid 10-digit mobile number.",
+                        )
+                      }
+                      const phoneE164 = `+91${digits}`
+                      const { error: resendErr } =
+                        await supabase.auth.signInWithOtp({
+                          phone: phoneE164,
+                          options: {
+                            data: {
+                              full_name: name.trim() || undefined,
+                              phone_e164: phoneE164,
+                              preferred_language: language,
+                            },
+                          },
+                        })
+                      if (resendErr) throw resendErr
+                      setNotice(
+                        "A new OTP was requested. Check your mobile messages.",
+                      )
+                    } else {
+                      const { error: resendErr } = await supabase.auth.resend({
+                        type: "signup",
+                        email: email.trim(),
+                        options: {
+                          emailRedirectTo: window.location.origin,
+                        },
+                      })
+                      if (resendErr) throw resendErr
+                      setNotice(
+                        "A new verification code was requested. Check your inbox and spam folder.",
+                      )
+                    }
                   } catch (cause: any) {
                     setError(
-                      cause?.message || "Could not resend confirmation email.",
+                      cause?.message ||
+                        "Could not resend the verification code.",
                     )
                   } finally {
                     setBusy(false)
@@ -1594,7 +1743,7 @@ function RealAuthScreen({
                   fontSize: 12,
                 }}
               >
-                Resend confirmation email
+                Resend code
               </button>
             </div>
           )}
@@ -1608,9 +1757,11 @@ function RealAuthScreen({
                     ? otpSent
                       ? "Verify OTP"
                       : "Send OTP"
-                    : mode === "signin"
-                      ? "Sign In to Cyber Sathi"
-                      : "Register Official Account"
+                    : mode === "signup" && otpSent
+                      ? "Verify email"
+                      : mode === "signin"
+                        ? "Sign In to Cyber Sathi"
+                        : "Register Official Account"
               }
               disabled={busy}
               onClick={() => {}}
@@ -2798,7 +2949,6 @@ function AgentChatScreen({
             </span>
           </div>
         )}
-
       </div>
 
       {reportFinalized && (
@@ -2818,7 +2968,8 @@ function AgentChatScreen({
               color: C.textSecondary,
             }}
           >
-            This report is finalized. Your saved conversation is available to review.
+            This report is finalized. Your saved conversation is available to
+            review.
           </p>
           <button
             type="button"
@@ -3031,7 +3182,9 @@ function AgentChatScreen({
         <button
           type="button"
           onClick={() => void handleSend()}
-          disabled={!caseId || !inputText.trim() || loadingReply || reportFinalized}
+          disabled={
+            !caseId || !inputText.trim() || loadingReply || reportFinalized
+          }
           aria-label="Send message"
           style={{
             width: 44,
@@ -3181,210 +3334,212 @@ function LiveVoiceScreen({
           textAlign: "center",
         }}
       >
-      <div
-        style={{
-          width: "100%",
-          display: "flex",
-          justifyContent: "space-between",
-          alignItems: "center",
-        }}
-      >
-        <div style={{ textAlign: "left" }}>
-          <strong style={{ fontSize: 15 }}>Cyber Sathi</strong>
-          <p
-            style={{
-              margin: "3px 0 0",
-              fontSize: 11,
-              color: "rgba(255,255,255,.65)",
-            }}
-          >
-            {status}
-          </p>
-        </div>
-        <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-          {active && (
-            <span
-              style={{
-                fontSize: 10,
-                fontWeight: 700,
-                color: C.mint300,
-                letterSpacing: "0.06em",
-              }}
-            >
-              LIVE
-            </span>
-          )}
-          <span
-            style={{
-              width: 10,
-              height: 10,
-              borderRadius: "50%",
-              background: active
-                ? "#22c55e"
-                : connecting || preparing
-                  ? C.warningIcon
-                  : error
-                    ? C.danger
-                    : "rgba(255,255,255,.35)",
-              boxShadow: active
-                ? "0 0 0 6px rgba(34,197,94,.25)"
-                : connecting || preparing
-                  ? "0 0 0 6px rgba(240,169,58,.2)"
-                  : "none",
-              animation:
-                connecting || preparing ? "pulse-dot 1s infinite" : "none",
-            }}
-          />
-        </div>
-      </div>
-      <div
-        style={{
-          display: "flex",
-          flexDirection: "column",
-          alignItems: "center",
-          gap: 18,
-        }}
-      >
-        <div className={showBreathing ? "voice-orb live" : "voice-orb"}>
-          <div className="voice-orb-core">🎙️</div>
-          <i />
-          <i />
-          <i />
-        </div>
-        {isConnected && (
-          <div className={isAgentSpeaking ? "voice-wave active" : "voice-wave"}>
-            <div className="voice-wave-bars" aria-hidden="true">
-              <span />
-              <span />
-              <span />
-              <span />
-              <span />
-              <span />
-              <span />
-              <span />
-              <span />
-              <span />
-              <span />
-              <span />
-            </div>
+        <div
+          style={{
+            width: "100%",
+            display: "flex",
+            justifyContent: "space-between",
+            alignItems: "center",
+          }}
+        >
+          <div style={{ textAlign: "left" }}>
+            <strong style={{ fontSize: 15 }}>Cyber Sathi</strong>
             <p
               style={{
-                margin: "10px 0 0",
+                margin: "3px 0 0",
                 fontSize: 11,
-                color: "rgba(255,255,255,.75)",
-                fontWeight: 600,
+                color: "rgba(255,255,255,.65)",
               }}
             >
-              {isAgentSpeaking
-                ? "Saathi is speaking…"
-                : "Connected · listening for your voice"}
+              {status}
             </p>
           </div>
-        )}
-        <div>
-          <h1 style={{ margin: 0, fontSize: 22 }}>
-            {active
-              ? "Speak naturally"
-              : connecting
-                ? "Connecting…"
-                : preparing
-                  ? "Preparing…"
-                  : error
-                    ? "Voice unavailable"
-                    : "Ready for voice"}
-          </h1>
-          <p
-            style={{
-              margin: "8px 0 0",
-              fontSize: 13,
-              lineHeight: 1.5,
-              color: "rgba(255,255,255,.7)",
-              maxWidth: 290,
-            }}
-          >
-            {active
-              ? `Saathi is connected and listening in ${langLabel}. Speak naturally; you can interrupt anytime.`
-              : connecting
-                ? `Requesting microphone and connecting Saathi in ${langLabel}…`
-                : preparing
-                  ? "Preparing your secure case session. Voice will connect automatically."
-                  : error ||
-                    "Tap Start to connect microphone and begin a live voice conversation with Saathi."}
-          </p>
+          <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+            {active && (
+              <span
+                style={{
+                  fontSize: 10,
+                  fontWeight: 700,
+                  color: C.mint300,
+                  letterSpacing: "0.06em",
+                }}
+              >
+                LIVE
+              </span>
+            )}
+            <span
+              style={{
+                width: 10,
+                height: 10,
+                borderRadius: "50%",
+                background: active
+                  ? "#22c55e"
+                  : connecting || preparing
+                    ? C.warningIcon
+                    : error
+                      ? C.danger
+                      : "rgba(255,255,255,.35)",
+                boxShadow: active
+                  ? "0 0 0 6px rgba(34,197,94,.25)"
+                  : connecting || preparing
+                    ? "0 0 0 6px rgba(240,169,58,.2)"
+                    : "none",
+                animation:
+                  connecting || preparing ? "pulse-dot 1s infinite" : "none",
+              }}
+            />
+          </div>
         </div>
-      </div>
-      <div style={{ width: "100%", display: "grid", gap: 10 }}>
-        {!active && !connecting && !preparing && (
+        <div
+          style={{
+            display: "flex",
+            flexDirection: "column",
+            alignItems: "center",
+            gap: 18,
+          }}
+        >
+          <div className={showBreathing ? "voice-orb live" : "voice-orb"}>
+            <div className="voice-orb-core">🎙️</div>
+            <i />
+            <i />
+            <i />
+          </div>
+          {isConnected && (
+            <div
+              className={isAgentSpeaking ? "voice-wave active" : "voice-wave"}
+            >
+              <div className="voice-wave-bars" aria-hidden="true">
+                <span />
+                <span />
+                <span />
+                <span />
+                <span />
+                <span />
+                <span />
+                <span />
+                <span />
+                <span />
+                <span />
+                <span />
+              </div>
+              <p
+                style={{
+                  margin: "10px 0 0",
+                  fontSize: 11,
+                  color: "rgba(255,255,255,.75)",
+                  fontWeight: 600,
+                }}
+              >
+                {isAgentSpeaking
+                  ? "Saathi is speaking…"
+                  : "Connected · listening for your voice"}
+              </p>
+            </div>
+          )}
+          <div>
+            <h1 style={{ margin: 0, fontSize: 22 }}>
+              {active
+                ? "Speak naturally"
+                : connecting
+                  ? "Connecting…"
+                  : preparing
+                    ? "Preparing…"
+                    : error
+                      ? "Voice unavailable"
+                      : "Ready for voice"}
+            </h1>
+            <p
+              style={{
+                margin: "8px 0 0",
+                fontSize: 13,
+                lineHeight: 1.5,
+                color: "rgba(255,255,255,.7)",
+                maxWidth: 290,
+              }}
+            >
+              {active
+                ? `Saathi is connected and listening in ${langLabel}. Speak naturally; you can interrupt anytime.`
+                : connecting
+                  ? `Requesting microphone and connecting Saathi in ${langLabel}…`
+                  : preparing
+                    ? "Preparing your secure case session. Voice will connect automatically."
+                    : error ||
+                      "Tap Start to connect microphone and begin a live voice conversation with Saathi."}
+            </p>
+          </div>
+        </div>
+        <div style={{ width: "100%", display: "grid", gap: 10 }}>
+          {!active && !connecting && !preparing && (
+            <button
+              type="button"
+              onClick={onStart}
+              disabled={!canStart}
+              style={{
+                border: 0,
+                borderRadius: 24,
+                padding: "13px",
+                fontWeight: 700,
+                cursor: canStart ? "pointer" : "not-allowed",
+                background: canStart ? C.mint300 : "rgba(127,209,192,.35)",
+                color: canStart ? C.teal900 : C.white,
+              }}
+            >
+              {error ? "Try voice again" : "Start Voice"}
+            </button>
+          )}
+          {(connecting || preparing) && (
+            <button
+              type="button"
+              disabled
+              style={{
+                border: 0,
+                borderRadius: 24,
+                padding: "13px",
+                fontWeight: 700,
+                cursor: "wait",
+                background: "rgba(127,209,192,.35)",
+                color: C.white,
+              }}
+            >
+              {preparing ? "Preparing…" : "Connecting…"}
+            </button>
+          )}
           <button
             type="button"
-            onClick={onStart}
-            disabled={!canStart}
+            onClick={onOpenChat}
+            disabled={isConnected}
             style={{
-              border: 0,
+              border: `1px solid ${
+                isConnected ? "rgba(255,255,255,.25)" : C.mint300
+              }`,
               borderRadius: 24,
               padding: "13px",
               fontWeight: 700,
-              cursor: canStart ? "pointer" : "not-allowed",
-              background: canStart ? C.mint300 : "rgba(127,209,192,.35)",
-              color: canStart ? C.teal900 : C.white,
+              cursor: isConnected ? "not-allowed" : "pointer",
+              background: "transparent",
+              color: isConnected ? "rgba(255,255,255,.45)" : C.white,
             }}
           >
-            {error ? "Try voice again" : "Start Voice"}
+            {isConnected
+              ? "Voice call active (stay on live screen)"
+              : "Open text chat"}
           </button>
-        )}
-        {(connecting || preparing) && (
           <button
             type="button"
-            disabled
+            onClick={onEnd}
             style={{
               border: 0,
-              borderRadius: 24,
-              padding: "13px",
-              fontWeight: 700,
-              cursor: "wait",
-              background: "rgba(127,209,192,.35)",
-              color: C.white,
+              background: "transparent",
+              color: "rgba(255,255,255,.72)",
+              padding: 7,
+              cursor: "pointer",
+              fontSize: 12,
             }}
           >
-            {preparing ? "Preparing…" : "Connecting…"}
+            End voice conversation
           </button>
-        )}
-        <button
-          type="button"
-          onClick={onOpenChat}
-          disabled={isConnected}
-          style={{
-            border: `1px solid ${
-              isConnected ? "rgba(255,255,255,.25)" : C.mint300
-            }`,
-            borderRadius: 24,
-            padding: "13px",
-            fontWeight: 700,
-            cursor: isConnected ? "not-allowed" : "pointer",
-            background: "transparent",
-            color: isConnected ? "rgba(255,255,255,.45)" : C.white,
-          }}
-        >
-          {isConnected
-            ? "Voice call active (stay on live screen)"
-            : "Open text chat"}
-        </button>
-        <button
-          type="button"
-          onClick={onEnd}
-          style={{
-            border: 0,
-            background: "transparent",
-            color: "rgba(255,255,255,.72)",
-            padding: 7,
-            cursor: "pointer",
-            fontSize: 12,
-          }}
-        >
-          End voice conversation
-        </button>
-      </div>
-      <style>{`
+        </div>
+        <style>{`
         .voice-orb{width:152px;height:152px;display:grid;place-items:center;position:relative}
         .voice-orb-core{z-index:2;width:84px;height:84px;border-radius:50%;display:grid;place-items:center;background:linear-gradient(135deg,#1d8577,#7fd1c0);font-size:32px;box-shadow:0 0 0 12px rgba(127,209,192,.12)}
         .voice-orb i{position:absolute;inset:8px;border:1.5px solid rgba(127,209,192,.55);border-radius:50%;opacity:0}
@@ -3414,7 +3569,7 @@ function LiveVoiceScreen({
         @keyframes pulse-dot{0%,100%{opacity:1}50%{opacity:.35}}
         @keyframes slideDown{from{transform:translateY(-100%);opacity:0}to{transform:translateY(0);opacity:1}}
       `}</style>
-    </div>
+      </div>
     </>
   )
 }
@@ -3633,7 +3788,11 @@ function ReviewReportScreen({
 
           <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
             <div>
-              <label className="cy-label" style={labelStyle} htmlFor="rev-category">
+              <label
+                className="cy-label"
+                style={labelStyle}
+                htmlFor="rev-category"
+              >
                 Incident Category
               </label>
               <input
@@ -3646,7 +3805,8 @@ function ReviewReportScreen({
                     category: e.target.value,
                   })
                 }
-                className="cy-input" style={inputStyle}
+                className="cy-input"
+                style={inputStyle}
               />
             </div>
 
@@ -3658,7 +3818,11 @@ function ReviewReportScreen({
               }}
             >
               <div>
-                <label className="cy-label" style={labelStyle} htmlFor="rev-amount">
+                <label
+                  className="cy-label"
+                  style={labelStyle}
+                  htmlFor="rev-amount"
+                >
                   Amount Defrauded
                 </label>
                 <input
@@ -3671,12 +3835,17 @@ function ReviewReportScreen({
                       amount: e.target.value,
                     })
                   }
-                  className="cy-input" style={{ ...inputStyle, fontWeight: 700, color: C.danger }}
+                  className="cy-input"
+                  style={{ ...inputStyle, fontWeight: 700, color: C.danger }}
                 />
               </div>
 
               <div>
-                <label className="cy-label" style={labelStyle} htmlFor="rev-date">
+                <label
+                  className="cy-label"
+                  style={labelStyle}
+                  htmlFor="rev-date"
+                >
                   Incident Date
                 </label>
                 <input
@@ -3689,13 +3858,18 @@ function ReviewReportScreen({
                       incidentDate: e.target.value,
                     })
                   }
-                  className="cy-input" style={inputStyle}
+                  className="cy-input"
+                  style={inputStyle}
                 />
               </div>
             </div>
 
             <div>
-              <label className="cy-label" style={labelStyle} htmlFor="rev-phone">
+              <label
+                className="cy-label"
+                style={labelStyle}
+                htmlFor="rev-phone"
+              >
                 Suspect Phone Number
               </label>
               <input
@@ -3709,7 +3883,8 @@ function ReviewReportScreen({
                     suspectPhone: e.target.value,
                   })
                 }
-                className="cy-input" style={inputStyle}
+                className="cy-input"
+                style={inputStyle}
               />
             </div>
 
@@ -3728,12 +3903,17 @@ function ReviewReportScreen({
                     suspectUpi: e.target.value,
                   })
                 }
-                className="cy-input" style={inputStyle}
+                className="cy-input"
+                style={inputStyle}
               />
             </div>
 
             <div>
-              <label className="cy-label" style={labelStyle} htmlFor="rev-suspect-details">
+              <label
+                className="cy-label"
+                style={labelStyle}
+                htmlFor="rev-suspect-details"
+              >
                 Suspect Website / Other Details
               </label>
               <input
@@ -3747,12 +3927,17 @@ function ReviewReportScreen({
                     suspectDetails: e.target.value,
                   })
                 }
-                className="cy-input" style={inputStyle}
+                className="cy-input"
+                style={inputStyle}
               />
             </div>
 
             <div>
-              <label className="cy-label" style={labelStyle} htmlFor="rev-platform">
+              <label
+                className="cy-label"
+                style={labelStyle}
+                htmlFor="rev-platform"
+              >
                 Platform / Banking App
               </label>
               <input
@@ -3766,12 +3951,17 @@ function ReviewReportScreen({
                     platform: e.target.value,
                   })
                 }
-                className="cy-input" style={inputStyle}
+                className="cy-input"
+                style={inputStyle}
               />
             </div>
 
             <div>
-              <label className="cy-label" style={labelStyle} htmlFor="rev-summary">
+              <label
+                className="cy-label"
+                style={labelStyle}
+                htmlFor="rev-summary"
+              >
                 Report Summary
               </label>
               <textarea
@@ -3784,12 +3974,17 @@ function ReviewReportScreen({
                     summary: e.target.value,
                   })
                 }
-                className="cy-input" style={{ ...inputStyle, resize: "vertical", lineHeight: 1.4 }}
+                className="cy-input"
+                style={{ ...inputStyle, resize: "vertical", lineHeight: 1.4 }}
               />
             </div>
 
             <div>
-              <label className="cy-label" style={labelStyle} htmlFor="rev-narrative">
+              <label
+                className="cy-label"
+                style={labelStyle}
+                htmlFor="rev-narrative"
+              >
                 Formal Incident Narrative for Cyber Cell
               </label>
               <textarea
@@ -3802,12 +3997,17 @@ function ReviewReportScreen({
                     complaintNarrative: e.target.value,
                   })
                 }
-                className="cy-input" style={{ ...inputStyle, resize: "vertical", lineHeight: 1.4 }}
+                className="cy-input"
+                style={{ ...inputStyle, resize: "vertical", lineHeight: 1.4 }}
               />
             </div>
 
             <div>
-              <label className="cy-label" style={labelStyle} htmlFor="rev-action-requested">
+              <label
+                className="cy-label"
+                style={labelStyle}
+                htmlFor="rev-action-requested"
+              >
                 Requested Action
               </label>
               <textarea
@@ -3820,7 +4020,8 @@ function ReviewReportScreen({
                     actionRequested: e.target.value,
                   })
                 }
-                className="cy-input" style={{ ...inputStyle, resize: "vertical", lineHeight: 1.4 }}
+                className="cy-input"
+                style={{ ...inputStyle, resize: "vertical", lineHeight: 1.4 }}
               />
             </div>
           </div>
@@ -4832,7 +5033,9 @@ function CaseStatusScreen({
                 borderRadius: 8,
               }}
             >
-              {isCaseOpen(caseRecord) ? "OPEN" : caseStatusLabel(caseRecord.status)}
+              {isCaseOpen(caseRecord)
+                ? "OPEN"
+                : caseStatusLabel(caseRecord.status)}
             </span>
           </div>
           <h3
