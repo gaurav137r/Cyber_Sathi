@@ -37,10 +37,12 @@ function blobToBase64(blob: Blob): Promise<string> {
   })
 }
 
-export async function saveBlobInNativeApp(
+async function sendBlobToNativeApp(
+  action: "SATHI_SAVE_FILE" | "SATHI_SHARE_POST",
   blob: Blob,
   fileName: string,
   mimeType: string,
+  options: { caption?: string platform?: string } = {},
 ): Promise<boolean> {
   const bridge = window.ReactNativeWebView
   if (!bridge?.postMessage) return false
@@ -74,19 +76,23 @@ export async function saveBlobInNativeApp(
         reject(new Error(result.error || "Could not save the downloaded file."))
     }
 
-    timeout = window.setTimeout(() => {
-      cleanup()
-      reject(new Error("The save dialog did not respond. Please try again."))
-    }, 120_000)
+    timeout = window.setTimeout(
+      () => {
+        cleanup()
+        reject(new Error("The save dialog did not respond. Please try again."))
+      },
+      action === "SATHI_SHARE_POST" ? 8_000 : 120_000,
+    )
     window.addEventListener("message", handleMessage)
     try {
       bridge.postMessage(
         JSON.stringify({
-          type: "SATHI_SAVE_FILE",
+          type: action,
           requestId,
           fileName,
           mimeType,
           base64,
+          ...options,
         }),
       )
     } catch (error) {
@@ -97,5 +103,26 @@ export async function saveBlobInNativeApp(
           : new Error("Could not send the file to the native app."),
       )
     }
+  })
+}
+
+export function saveBlobInNativeApp(
+  blob: Blob,
+  fileName: string,
+  mimeType: string,
+): Promise<boolean> {
+  return sendBlobToNativeApp("SATHI_SAVE_FILE", blob, fileName, mimeType)
+}
+
+export function sharePostInNativeApp(
+  blob: Blob,
+  fileName: string,
+  mimeType: string,
+  caption: string,
+  platform: string,
+): Promise<boolean> {
+  return sendBlobToNativeApp("SATHI_SHARE_POST", blob, fileName, mimeType, {
+    caption,
+    platform,
   })
 }

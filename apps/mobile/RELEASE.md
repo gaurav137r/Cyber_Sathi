@@ -1,7 +1,7 @@
 # Android release builds
 
 The `Build Android APK` GitHub Actions workflow builds a signed APK from the
-Expo-managed app. Version 1.0.3 uses Android version code 4. It runs for a
+Expo-managed app. Version 1.0.4 uses Android version code 5. It runs for a
 `v*` tag or by manual dispatch.
 
 ## One-time signing setup

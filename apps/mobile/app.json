@@ -2,7 +2,7 @@
   "expo": {
     "name": "Cyber Sathi",
     "slug": "cyber-sathi",
-    "version": "1.0.3",
+    "version": "1.0.4",
     "icon": "./assets/icon.png",
     "splash": {
       "image": "./assets/splash.png",
@@ -20,7 +20,7 @@
     ],
     "android": {
       "package": "com.cybersathi.app",
-      "versionCode": 4,
+      "versionCode": 5,
       "adaptiveIcon": {
         "foregroundImage": "./assets/icon.png",
         "backgroundColor": "#0B2E2E"
@@ -55,7 +55,18 @@
       "favicon": "./assets/favicon.png"
     },
     "plugins": [
-      "expo-sharing"
+      "expo-sharing",
+      [
+        "react-native-share",
+        {
+          "android": [
+            "com.linkedin.android",
+            "com.instagram.android",
+            "com.facebook.katana",
+            "com.twitter.android"
+          ]
+        }
+      ]
     ]
   }
 }

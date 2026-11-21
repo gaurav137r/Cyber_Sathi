@@ -15,7 +15,10 @@ import {
   type ReportLanguage,
   type ReportSocialPlatform,
 } from "../lib/report-center"
-import { saveBlobInNativeApp } from "../lib/native-file-save"
+import {
+  saveBlobInNativeApp,
+  sharePostInNativeApp,
+} from "../lib/native-file-save"
 
 const C = {
   teal900: "#0B2E2E",
@@ -86,7 +89,9 @@ function localSummary(record: CaseRecord, language: ReportLanguage): string {
   const amount = record.amount ? redact(record.amount) : ""
   const platform = record.platform ? redact(record.platform) : ""
   const date = record.incidentDate ? redact(record.incidentDate) : ""
-  const narrative = redact(record.complaintNarrative || record.summary || "").slice(0, 700)
+  const narrative = redact(
+    record.complaintNarrative || record.summary || "",
+  ).slice(0, 700)
 
   if (language === "hi") {
     const lines = [
@@ -123,7 +128,7 @@ function localPost(
   record: CaseRecord,
   platform: ReportSocialPlatform,
   language: ReportLanguage,
-): { caption: string; hashtags: string[] } {
+): { caption: string hashtags: string[] } {
   const category = (record.category || "cyber fraud").replace(/-/g, " ")
   const limit = platforms.find((item) => item.id === platform)?.limit ?? 2000
   const hashtags =
@@ -139,7 +144,10 @@ function localPost(
   const tags = hashtags.join(" ")
   const full = `${caption}\n\n${tags}`
   if (full.length <= limit) return { caption, hashtags }
-  return { caption: caption.slice(0, Math.max(40, limit - tags.length - 2)), hashtags }
+  return {
+    caption: caption.slice(0, Math.max(40, limit - tags.length - 2)),
+    hashtags,
+  }
 }
 
 function normaliseTags(value: unknown): string[] {
@@ -149,7 +157,9 @@ function normaliseTags(value: unknown): string[] {
 }
 
 function composeUrl(platform: ReportSocialPlatform, text: string): string {
-  const base = platforms.find((item) => item.id === platform)?.url ?? "https://www.google.com"
+  const base =
+    platforms.find((item) => item.id === platform)?.url ??
+    "https://www.google.com"
   const encoded = encodeURIComponent(text)
   if (platform === "twitter") return `${base}?text=${encoded}`
   if (platform === "linkedin") return `${base}&text=${encoded}`
@@ -174,23 +184,34 @@ export default function ReportSummaryScreen({
   const [language, setLanguage] = useState<ReportLanguage>(
     preferredLanguage === "hi" ? "hi" : "en",
   )
-  const [summaries, setSummaries] = useState<Partial<Record<ReportLanguage, string>>>({})
-  const [localLanguages, setLocalLanguages] = useState<Record<string, boolean>>({})
+  const [summaries, setSummaries] =
+    useState<Partial<Record<ReportLanguage, string>>>({})
+  const [localLanguages, setLocalLanguages] = useState<Record<string, boolean>>(
+    {},
+  )
   const [summaryBusy, setSummaryBusy] = useState(false)
   const [summaryError, setSummaryError] = useState("")
   const [platform, setPlatform] = useState<ReportSocialPlatform>("linkedin")
-  const [draft, setDraft] = useState<{ caption: string; hashtags: string[] } | null>(null)
+  const [draft, setDraft] = useState<{
+    caption: string
+    hashtags: string[]
+  } | null>(null)
   const [postBusy, setPostBusy] = useState(false)
   const [postError, setPostError] = useState("")
   const [posterBusy, setPosterBusy] = useState(false)
   const [posterError, setPosterError] = useState("")
   const [posterImageUrl, setPosterImageUrl] = useState<string | null>(null)
+  const [posterBlob, setPosterBlob] = useState<Blob | null>(null)
   const [posterFileName, setPosterFileName] = useState("")
   const [posterReady, setPosterReady] = useState(false)
+  const [shareBusy, setShareBusy] = useState(false)
+  const [posterDownloadError, setPosterDownloadError] = useState("")
+  const [posterDownloadNotice, setPosterDownloadNotice] = useState("")
   const [notice, setNotice] = useState("")
   const [centreLoaded, setCentreLoaded] = useState(false)
   const [centreError, setCentreError] = useState("")
-  const [downloadBusy, setDownloadBusy] = useState<ReportExportFormat | null>(null)
+  const [downloadBusy, setDownloadBusy] =
+    useState<ReportExportFormat | "poster" | null>(null)
   const [downloadError, setDownloadError] = useState("")
   const [downloadNotice, setDownloadNotice] = useState("")
   const requestedRef = useRef<Record<string, boolean>>({})
@@ -202,8 +223,12 @@ export default function ReportSummaryScreen({
         if (!live) return
         setSummaries((previous) => ({
           ...previous,
-          ...(centre.report?.summaryEnglish ? { en: centre.report.summaryEnglish } : {}),
-          ...(centre.report?.summaryHindi ? { hi: centre.report.summaryHindi } : {}),
+          ...(centre.report?.summaryEnglish
+            ? { en: centre.report.summaryEnglish }
+            : {}),
+          ...(centre.report?.summaryHindi
+            ? { hi: centre.report.summaryHindi }
+            : {}),
         }))
         const savedPost = centre.socialPosts.find((post) =>
           platforms.some((item) => item.id === post.platform),
@@ -249,9 +274,12 @@ export default function ReportSummaryScreen({
           "final",
         )
         if (!live) return
+        setPosterBlob(blob)
         setPosterImageUrl(URL.createObjectURL(blob))
         setPosterFileName(
-          `cyber-sathi-${savedImage.template}-${savedImage.width}x${savedImage.height}.${savedImage.format === "jpeg" ? "jpg" : savedImage.format}`,
+          `cyber-sathi-${savedImage.template}-${savedImage.width}x${savedImage.height}.${
+            savedImage.format === "jpeg" ? "jpg" : savedImage.format
+          }`,
         )
         setPosterReady(true)
       })
@@ -284,7 +312,10 @@ export default function ReportSummaryScreen({
       setSummaryError("")
       try {
         const generated = await generateReportSummary(caseRecord.id, target)
-        setSummaries((previous) => ({ ...previous, [target]: generated.summary }))
+        setSummaries((previous) => ({
+          ...previous,
+          [target]: generated.summary,
+        }))
       } catch (error) {
         setSummaries((previous) => ({
           ...previous,
@@ -292,9 +323,11 @@ export default function ReportSummaryScreen({
         }))
         setLocalLanguages((previous) => ({ ...previous, [target]: true }))
         setSummaryError(
-          `${target === "hi"
-            ? "सारांश सेवा उपलब्ध नहीं थी, इसलिए इस डिवाइस पर सुरक्षित सारांश बनाया गया है।"
-            : "The summary service was unavailable, so a safe summary was created on this device."}${error instanceof Error ? ` ${error.message}` : ""}`,
+          `${
+            target === "hi"
+              ? "सारांश सेवा उपलब्ध नहीं थी, इसलिए इस डिवाइस पर सुरक्षित सारांश बनाया गया है।"
+              : "The summary service was unavailable, so a safe summary was created on this device."
+          }${error instanceof Error ? ` ${error.message}` : ""}`,
         )
       } finally {
         setSummaryBusy(false)
@@ -309,7 +342,8 @@ export default function ReportSummaryScreen({
     void loadSummary(language)
   }, [centreLoaded, language, summaries, summaryBusy, loadSummary])
 
-  const selectedPlatform = platforms.find((item) => item.id === platform) ?? platforms[0]
+  const selectedPlatform =
+    platforms.find((item) => item.id === platform) ?? platforms[0]
   const summaryText = summaries[language] ?? ""
 
   const switchLanguage = (next: ReportLanguage) => {
@@ -349,7 +383,9 @@ export default function ReportSummaryScreen({
       }
       setDownloadNotice(
         language === "hi"
-          ? `${format.toUpperCase()} फ़ाइल ${savedNatively ? "शेयर शीट में खुल गई है।" : "डाउनलोड हो रही है।"}`
+          ? `${format.toUpperCase()} फ़ाइल ${
+              savedNatively ? "शेयर शीट में खुल गई है।" : "डाउनलोड हो रही है।"
+            }`
           : savedNatively
             ? `Your ${format.toUpperCase()} report is ready to save or share.`
             : `Your ${format.toUpperCase()} report is downloading.`,
@@ -380,7 +416,9 @@ export default function ReportSummaryScreen({
     anchor.remove()
     window.setTimeout(() => URL.revokeObjectURL(url), 1_500)
     setDownloadNotice(
-      language === "hi" ? "सारांश डाउनलोड हो रहा है।" : "Your summary is downloading.",
+      language === "hi"
+        ? "सारांश डाउनलोड हो रहा है।"
+        : "Your summary is downloading.",
     )
   }
 
@@ -391,7 +429,11 @@ export default function ReportSummaryScreen({
     setPosterError("")
     setPosterReady(false)
     try {
-      const created = await generateSocialDraft(caseRecord.id, platform, language)
+      const created = await generateSocialDraft(
+        caseRecord.id,
+        platform,
+        language,
+      )
       setDraft({
         caption: created.caption,
         hashtags: normaliseTags(created.hashtags),
@@ -403,15 +445,17 @@ export default function ReportSummaryScreen({
             ? "ड्राफ्ट और पोस्टर तैयार हैं। इन्हें जाँचें, फिर साझा करें।"
             : "Draft and poster are ready. Review them, then share when you are ready."
           : language === "hi"
-            ? "ड्राफ्ट तैयार है। पोस्टर नहीं बन सका, पर आप कैप्शन साझा कर सकते हैं।"
-            : "Draft is ready. The poster could not be generated, but you can still share the caption.",
+            ? "ड्राफ्ट तैयार है, लेकिन पोस्टर नहीं बन सका। साझा करने से पहले दोबारा कोशिश करें।"
+            : "Draft is ready, but the poster could not be generated. Try again before sharing.",
       )
     } catch (error) {
       setDraft(localPost(caseRecord, platform, language))
       setPostError(
-        `${language === "hi"
-          ? "पोस्ट सेवा उपलब्ध नहीं थी, इसलिए इस डिवाइस पर सुरक्षित ड्राफ्ट बनाया गया है।"
-          : "The post service was unavailable, so a safe draft was created on this device."}${error instanceof Error ? ` ${error.message}` : ""}`,
+        `${
+          language === "hi"
+            ? "पोस्ट सेवा उपलब्ध नहीं थी, इसलिए इस डिवाइस पर सुरक्षित ड्राफ्ट बनाया गया है।"
+            : "The post service was unavailable, so a safe draft was created on this device."
+        }${error instanceof Error ? ` ${error.message}` : ""}`,
       )
     } finally {
       setPostBusy(false)
@@ -432,6 +476,7 @@ export default function ReportSummaryScreen({
         "final",
       )
       const url = URL.createObjectURL(blob)
+      setPosterBlob(blob)
       setPosterImageUrl(url)
       setPosterFileName(
         `cyber-sathi-${created.template}-${created.width}x${created.height}.png`,
@@ -454,17 +499,23 @@ export default function ReportSummaryScreen({
   }
 
   const resetPoster = () => {
+    setPosterBlob(null)
     setPosterImageUrl(null)
     setPosterFileName("")
     setPosterReady(false)
     setPosterError("")
+    setPosterDownloadError("")
+    setPosterDownloadNotice("")
   }
 
   const copyDraft = async () => {
     if (!draft) return
-    const text = `${draft.caption}${draft.hashtags.length ? `\n\n${draft.hashtags.join(" ")}` : ""}`
+    const text = `${draft.caption}${
+      draft.hashtags.length ? `\n\n${draft.hashtags.join(" ")}` : ""
+    }`
     try {
-      if (!navigator.clipboard?.writeText) throw new Error("Clipboard unavailable")
+      if (!navigator.clipboard?.writeText)
+        throw new Error("Clipboard unavailable")
       await navigator.clipboard.writeText(text)
       setNotice(
         language === "hi"
@@ -481,51 +532,131 @@ export default function ReportSummaryScreen({
   }
 
   const downloadPost = async () => {
-    if (!posterImageUrl) return
-    setDownloadError("")
+    if (!posterImageUrl || !posterBlob) return
+    setDownloadBusy("poster")
+    setPosterDownloadError("")
+    setPosterDownloadNotice("")
     try {
-      const anchor = document.createElement("a")
-      anchor.href = posterImageUrl
-      anchor.download = posterFileName || "cyber-sathi-poster.png"
-      document.body.appendChild(anchor)
-      anchor.click()
-      anchor.remove()
-      setNotice(
-        language === "hi"
-          ? "पोस्टर डाउनलोड हो रहा है।"
-          : "Your poster is downloading.",
+      const savedNatively = await saveBlobInNativeApp(
+        posterBlob,
+        posterFileName || "cyber-sathi-poster.png",
+        posterBlob.type || "image/png",
       )
+      if (savedNatively) {
+        setPosterDownloadNotice(
+          language === "hi"
+            ? "पोस्टर चुने गए फ़ोल्डर में सेव हो गया है।"
+            : "Your poster was saved to the selected folder.",
+        )
+      } else {
+        const anchor = document.createElement("a")
+        anchor.href = posterImageUrl
+        anchor.download = posterFileName || "cyber-sathi-poster.png"
+        document.body.appendChild(anchor)
+        anchor.click()
+        anchor.remove()
+        setPosterDownloadNotice(
+          language === "hi"
+            ? "पोस्टर डाउनलोड हो रहा है।"
+            : "Your poster is downloading.",
+        )
+      }
     } catch (error) {
-      setDownloadError(
+      setPosterDownloadError(
         error instanceof Error
           ? error.message
           : language === "hi"
             ? "पोस्टर डाउनलोड नहीं हो सका।"
             : "The poster could not be downloaded.",
       )
+    } finally {
+      setDownloadBusy(null)
     }
   }
 
   const postToPlatform = async () => {
-    if (!draft) return
-    const text = `${draft.caption}${draft.hashtags.length ? `\n\n${draft.hashtags.join(" ")}` : ""}`
-    // Open first so browsers do not treat the tab as a blocked popup while the
-    // clipboard write is in flight.
-    window.open(composeUrl(platform, text), "_blank", "noopener,noreferrer")
+    if (!draft || !posterBlob || !posterReady) return
+    const text = `${draft.caption}${
+      draft.hashtags.length ? `\n\n${draft.hashtags.join(" ")}` : ""
+    }`
+    setShareBusy(true)
     try {
-      await navigator.clipboard?.writeText(text)
-    } catch {
-      // The platform tab still opens; the user can copy the preview manually.
+      try {
+        const sharedNatively = await sharePostInNativeApp(
+          posterBlob,
+          posterFileName || "cyber-sathi-poster.png",
+          posterBlob.type || "image/png",
+          text,
+          platform,
+        )
+        if (sharedNatively) {
+          setNotice(
+            `${selectedPlatform.name} opened with the poster and caption. Review the post and tap Post to publish.`,
+          )
+          return
+        }
+      } catch {
+        // Try the browser's native share sheet before falling back to text-only sharing.
+      }
+
+      const file = new File(
+        [posterBlob],
+        posterFileName || "cyber-sathi-poster.png",
+        {
+          type: posterBlob.type || "image/png",
+        },
+      )
+      if (
+        navigator.share &&
+        (!navigator.canShare || navigator.canShare({ files: [file] }))
+      ) {
+        await navigator.share({
+          files: [file],
+          text,
+          title: "Cyber Sathi awareness post",
+        })
+        setNotice(
+          `${selectedPlatform.name} share sheet opened with the poster and caption. Review the post before publishing.`,
+        )
+        return
+      }
+
+      window.open(composeUrl(platform, text), "_blank", "noopener,noreferrer")
+      try {
+        await navigator.clipboard?.writeText(text)
+      } catch {
+        setNotice(
+          `Could not attach the poster automatically. Download it and attach it in ${selectedPlatform.name}; the caption is shown above for copying.`,
+        )
+        return
+      }
+      setNotice(
+        `The ${selectedPlatform.name} page is open and the caption is copied. Download the poster and attach it before publishing.`,
+      )
+    } catch (error) {
+      if (error instanceof Error && error.name === "AbortError") {
+        setNotice("Sharing was cancelled.")
+        return
+      }
+      setPostError(
+        error instanceof Error
+          ? `Could not share the poster and caption: ${error.message}`
+          : "Could not share the poster and caption.",
+      )
+    } finally {
+      setShareBusy(false)
     }
-    setNotice(
-      language === "hi"
-        ? `${selectedPlatform.name} खुल गया है। पोस्ट पेस्ट करके प्रकाशित करें।`
-        : `${selectedPlatform.name} is open. Paste the post and publish it.`,
-    )
   }
 
   return (
-    <div style={{ flex: 1, display: "flex", flexDirection: "column", background: C.bgCanvas }}>
+    <div
+      style={{
+        flex: 1,
+        display: "flex",
+        flexDirection: "column",
+        background: C.bgCanvas,
+      }}
+    >
       <div
         style={{
           padding: "16px 20px 14px",
@@ -553,8 +684,15 @@ export default function ReportSummaryScreen({
             >
               Your report summary
             </h2>
-            <p style={{ margin: "3px 0 0", fontSize: 11, color: C.textSecondary }}>
-              Saved to your Cyber Sathi account. Choose a language, then share an awareness post.
+            <p
+              style={{
+                margin: "3px 0 0",
+                fontSize: 11,
+                color: C.textSecondary,
+              }}
+            >
+              Saved to your Cyber Sathi account. Choose a language, then share
+              an awareness post.
             </p>
           </div>
           <button
@@ -598,9 +736,18 @@ export default function ReportSummaryScreen({
           }}
         >
           <span style={{ fontSize: 17 }}>✅</span>
-          <p style={{ margin: 0, fontSize: 11, lineHeight: 1.5, color: C.teal700 }}>
+          <p
+            style={{
+              margin: 0,
+              fontSize: 11,
+              lineHeight: 1.5,
+              color: C.teal700,
+            }}
+          >
             <strong>Report saved.</strong> Case ID:{" "}
-            <span style={{ fontFamily: "monospace" }}>{caseRecord.trackingNumber || caseRecord.id}</span>
+            <span style={{ fontFamily: "monospace" }}>
+              {caseRecord.trackingNumber || caseRecord.id}
+            </span>
           </p>
         </div>
 
@@ -634,15 +781,29 @@ export default function ReportSummaryScreen({
               }}
             />
             <div>
-              <p style={{ margin: 0, fontSize: 12, fontWeight: 700, color: C.textPrimary }}>
-                {caseRecord.status === "FILED" || caseRecord.status === "RESOLVED" || caseRecord.status === "ARCHIVED"
+              <p
+                style={{
+                  margin: 0,
+                  fontSize: 12,
+                  fontWeight: 700,
+                  color: C.textPrimary,
+                }}
+              >
+                {caseRecord.status === "FILED" ||
+                caseRecord.status === "RESOLVED" ||
+                caseRecord.status === "ARCHIVED"
                   ? "Case Closed"
                   : caseRecord.status === "REVIEWED"
                     ? "Report Completed"
                     : "In Progress"}
               </p>
               <p style={{ margin: 0, fontSize: 10, color: C.textSecondary }}>
-                Status: <strong>{caseRecord.status === "REVIEWED" ? "COMPLETED" : caseRecord.status}</strong>
+                Status:{" "}
+                <strong>
+                  {caseRecord.status === "REVIEWED"
+                    ? "COMPLETED"
+                    : caseRecord.status}
+                </strong>
               </p>
             </div>
           </div>
@@ -757,7 +918,9 @@ export default function ReportSummaryScreen({
             </p>
             {summaryBusy && !summaryText ? (
               <p style={{ margin: 0, fontSize: 12, color: C.textSecondary }}>
-                {language === "hi" ? "सारांश तैयार हो रहा है…" : "Preparing your summary…"}
+                {language === "hi"
+                  ? "सारांश तैयार हो रहा है…"
+                  : "Preparing your summary…"}
               </p>
             ) : (
               <p
@@ -776,7 +939,14 @@ export default function ReportSummaryScreen({
               </p>
             )}
             {summaryError && (
-              <p style={{ margin: "9px 0 0", fontSize: 10, lineHeight: 1.45, color: C.textSecondary }}>
+              <p
+                style={{
+                  margin: "9px 0 0",
+                  fontSize: 10,
+                  lineHeight: 1.45,
+                  color: C.textSecondary,
+                }}
+              >
                 {summaryError}
               </p>
             )}
@@ -799,14 +969,30 @@ export default function ReportSummaryScreen({
               {language === "hi" ? "सारांश डाउनलोड करें" : "Download summary"}
             </button>
             {summaryBusy && summaryText && (
-              <p style={{ margin: "9px 0 0", fontSize: 10, color: C.textSecondary }}>
+              <p
+                style={{
+                  margin: "9px 0 0",
+                  fontSize: 10,
+                  color: C.textSecondary,
+                }}
+              >
                 {language === "hi" ? "अद्यतन हो रहा है…" : "Refreshing…"}
               </p>
             )}
           </div>
-          <p style={{ margin: "9px 0 0", fontSize: 10, lineHeight: 1.45, color: C.textSecondary }}>
-            Personal names, phone numbers, account numbers and links are hidden from this summary.
-            {localLanguages[language] ? " This summary was built privately on your device." : ""}
+          <p
+            style={{
+              margin: "9px 0 0",
+              fontSize: 10,
+              lineHeight: 1.45,
+              color: C.textSecondary,
+            }}
+          >
+            Personal names, phone numbers, account numbers and links are hidden
+            from this summary.
+            {localLanguages[language]
+              ? " This summary was built privately on your device."
+              : ""}
           </p>
         </div>
 
@@ -829,15 +1015,32 @@ export default function ReportSummaryScreen({
           >
             DOWNLOAD COMPLETE REPORT
           </p>
-          <p style={{ margin: "0 0 11px", fontSize: 11, color: C.textSecondary, lineHeight: 1.5 }}>
+          <p
+            style={{
+              margin: "0 0 11px",
+              fontSize: 11,
+              color: C.textSecondary,
+              lineHeight: 1.5,
+            }}
+          >
             {language === "hi"
               ? "इसमें सभी फ़ील्ड, घटना का विस्तृत विवरण, साक्ष्य और बिना संपादित तकनीकी जानकारी शामिल है।"
               : "Includes every field, the detailed incident narrative, evidence text, and unredacted technical details."}
           </p>
-          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
+          <div
+            style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}
+          >
             {([
-              ["json", "JSON", language === "hi" ? "संरचित डेटा" : "Structured data"],
-              ["docx", "DOCX", language === "hi" ? "वर्ड दस्तावेज़" : "Word document"],
+              [
+                "json",
+                "JSON",
+                language === "hi" ? "संरचित डेटा" : "Structured data",
+              ],
+              [
+                "docx",
+                "DOCX",
+                language === "hi" ? "वर्ड दस्तावेज़" : "Word document",
+              ],
               ["pdf", "PDF", language === "hi" ? "प्रिंट-रेडी" : "Print-ready"],
               ["txt", "TXT", language === "hi" ? "सादा टेक्स्ट" : "Plain text"],
             ] as const).map(([value, label, description]) => (
@@ -853,23 +1056,48 @@ export default function ReportSummaryScreen({
                   padding: "10px",
                   cursor: downloadBusy !== null ? "wait" : "pointer",
                   textAlign: "left",
-                  opacity: downloadBusy !== null && downloadBusy !== value ? 0.55 : 1,
+                  opacity:
+                    downloadBusy !== null && downloadBusy !== value ? 0.55 : 1,
                 }}
               >
-                <strong style={{ display: "block", fontSize: 12, color: C.textPrimary }}>
+                <strong
+                  style={{
+                    display: "block",
+                    fontSize: 12,
+                    color: C.textPrimary,
+                  }}
+                >
                   {downloadBusy === value ? `${label}…` : label}
                 </strong>
-                <span style={{ fontSize: 9.5, color: C.textSecondary }}>{description}</span>
+                <span style={{ fontSize: 9.5, color: C.textSecondary }}>
+                  {description}
+                </span>
               </button>
             ))}
           </div>
           {downloadError && (
-            <p role="alert" style={{ margin: "9px 0 0", fontSize: 10, lineHeight: 1.45, color: C.danger }}>
+            <p
+              role="alert"
+              style={{
+                margin: "9px 0 0",
+                fontSize: 10,
+                lineHeight: 1.45,
+                color: C.danger,
+              }}
+            >
               {downloadError}
             </p>
           )}
           {downloadNotice && (
-            <p role="status" style={{ margin: "9px 0 0", fontSize: 10, lineHeight: 1.45, color: C.teal700 }}>
+            <p
+              role="status"
+              style={{
+                margin: "9px 0 0",
+                fontSize: 10,
+                lineHeight: 1.45,
+                color: C.teal700,
+              }}
+            >
               {downloadNotice}
             </p>
           )}
@@ -894,12 +1122,21 @@ export default function ReportSummaryScreen({
           >
             SHARE AWARENESS
           </p>
-          <p style={{ margin: "0 0 11px", fontSize: 11, color: C.textSecondary, lineHeight: 1.5 }}>
+          <p
+            style={{
+              margin: "0 0 11px",
+              fontSize: 11,
+              color: C.textSecondary,
+              lineHeight: 1.5,
+            }}
+          >
             {language === "hi"
               ? "एक प्लेटफ़ॉर्म चुनें। Cyber Sathi आपके सारांश से एक सुरक्षित पोस्ट बनाएगा।"
               : "Pick a platform. Cyber Sathi will create a safe post from your summary."}
           </p>
-          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
+          <div
+            style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}
+          >
             {platforms.map((item) => {
               const active = item.id === platform
               return (
@@ -940,7 +1177,13 @@ export default function ReportSummaryScreen({
                   >
                     {item.badge}
                   </span>
-                  <span style={{ fontSize: 12, fontWeight: 700, color: C.textPrimary }}>
+                  <span
+                    style={{
+                      fontSize: 12,
+                      fontWeight: 700,
+                      color: C.textPrimary,
+                    }}
+                  >
                     {item.name}
                   </span>
                 </button>
@@ -975,7 +1218,14 @@ export default function ReportSummaryScreen({
           </button>
 
           {postError && (
-            <p style={{ margin: "9px 0 0", fontSize: 10, lineHeight: 1.45, color: C.textSecondary }}>
+            <p
+              style={{
+                margin: "9px 0 0",
+                fontSize: 10,
+                lineHeight: 1.45,
+                color: C.textSecondary,
+              }}
+            >
               {postError}
             </p>
           )}
@@ -1049,7 +1299,9 @@ export default function ReportSummaryScreen({
                       }}
                     >
                       <span style={{ fontSize: 10, color: C.teal700 }}>
-                        {language === "hi" ? "पोस्टर बन रहा है…" : "Building poster…"}
+                        {language === "hi"
+                          ? "पोस्टर बन रहा है…"
+                          : "Building poster…"}
                       </span>
                     </div>
                   )}
@@ -1079,11 +1331,25 @@ export default function ReportSummaryScreen({
                 {draft.caption}
               </p>
               {draft.hashtags.length > 0 && (
-                <p style={{ margin: "7px 0 0", fontSize: 11, lineHeight: 1.45, color: C.teal700 }}>
+                <p
+                  style={{
+                    margin: "7px 0 0",
+                    fontSize: 11,
+                    lineHeight: 1.45,
+                    color: C.teal700,
+                  }}
+                >
                   {draft.hashtags.join(" ")}
                 </p>
               )}
-              <div style={{ display: "flex", flexWrap: "wrap", gap: 7, marginTop: 11 }}>
+              <div
+                style={{
+                  display: "flex",
+                  flexWrap: "wrap",
+                  gap: 7,
+                  marginTop: 11,
+                }}
+              >
                 <button
                   type="button"
                   onClick={() => void copyDraft()}
@@ -1104,6 +1370,7 @@ export default function ReportSummaryScreen({
                   <button
                     type="button"
                     onClick={() => void downloadPost()}
+                    disabled={downloadBusy === "poster"}
                     style={{
                       border: `1px solid ${C.divider}`,
                       background: C.white,
@@ -1112,29 +1379,64 @@ export default function ReportSummaryScreen({
                       padding: "7px 11px",
                       fontSize: 11,
                       fontWeight: 700,
-                      cursor: "pointer",
+                      cursor: downloadBusy === "poster" ? "wait" : "pointer",
                     }}
                   >
-                    Download post
+                    {downloadBusy === "poster" ? "Saving…" : "Download post"}
                   </button>
                 )}
                 <button
                   type="button"
                   onClick={() => void postToPlatform()}
+                  disabled={shareBusy || !posterReady || !posterBlob}
                   style={{
                     border: 0,
-                    background: C.teal600,
+                    background:
+                      shareBusy || !posterReady || !posterBlob
+                        ? "#9AA6A3"
+                        : C.teal600,
                     color: C.white,
                     borderRadius: 18,
                     padding: "7px 12px",
                     fontSize: 11,
                     fontWeight: 700,
-                    cursor: "pointer",
+                    cursor:
+                      shareBusy || !posterReady || !posterBlob
+                        ? "not-allowed"
+                        : "pointer",
                   }}
                 >
-                  Post on {selectedPlatform.name} ↗
+                  {shareBusy
+                    ? "Opening share…"
+                    : `Share on ${selectedPlatform.name} ↗`}
                 </button>
               </div>
+              {posterDownloadError && (
+                <p
+                  role="alert"
+                  style={{
+                    margin: "9px 0 0",
+                    fontSize: 10,
+                    lineHeight: 1.45,
+                    color: C.danger,
+                  }}
+                >
+                  {posterDownloadError}
+                </p>
+              )}
+              {posterDownloadNotice && (
+                <p
+                  role="status"
+                  style={{
+                    margin: "9px 0 0",
+                    fontSize: 10,
+                    lineHeight: 1.45,
+                    color: C.teal700,
+                  }}
+                >
+                  {posterDownloadNotice}
+                </p>
+              )}
             </div>
           )}
 
